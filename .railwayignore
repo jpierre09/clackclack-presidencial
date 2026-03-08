@@ -1,0 +1,11 @@
+e14_downloads/
+results/
+*.db
+*.db-wal
+*.db-shm
+*.xlsx
+__pycache__/
+*.pyc
+backend/.venv/
+frontend/node_modules/
+.claude/

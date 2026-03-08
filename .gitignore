@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+e14_downloads/
 .claude/
 *.db
 *.db-wal
