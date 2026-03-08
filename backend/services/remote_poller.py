@@ -1,19 +1,26 @@
-"""HTTP downloader for E-14 PDFs from Registraduría public API.
+"""HTTP downloader for E-14 PDFs via Registraduría GraphQL API (AWS AppSync).
 
-Polls:
-  GET /assets/temis/divipol_json/allTransmissionCodes.json  → status3 + status11 nodes
-  GET /assets/temis/divipol_json/allDepartments.json
-  GET /assets/temis/divipol_json/allCorporations.json
-  GET /assets/temis/divipol_json/departmentsTree.json
+Auth flow:
+  1. GET Cognito unauthenticated identity (Identity Pool)
+  2. GET temporary AWS credentials
+  3. Sign GraphQL requests with AWS SigV4
+
+Queries used:
+  departmentsTree  → department / municipality / zone / stand name maps
+  allTransmissionCodes(condition: {idDepartmentCode, idTransmissionCodeStatus in [3,11]})
 
 PDF URL pattern:
-  /assets/temis/pdf/{dep}/{mun}/{zone3}/{stand2}/{mesa3}/{acronym}/{expectedName}?uuid={uuid}
+  {base}/assets/temis/pdf/{dep}/{mun}/{zone3}/{stand2}/{mesa3}/{acronym}/{expectedName}?uuid=…
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
-import uuid
+import uuid as _uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -32,21 +39,25 @@ from backend.services.local_ingest import ingest_file
 
 log = logging.getLogger(__name__)
 
-_CATALOG_BASE = f"{REGISTRADURIA_BASE_URL}/assets/temis/divipol_json"
 _PDF_BASE = f"{REGISTRADURIA_BASE_URL}/assets/temis/pdf"
+_GQL_URL = "https://apx2e14awsprodcong.tps.net.co/graphql"
+_GQL_HOST = "apx2e14awsprodcong.tps.net.co"
+_GQL_REGION = "us-east-2"
+_GQL_SERVICE = "appsync"
+_IDENTITY_POOL_ID = "us-east-2:b3d8591c-b2ce-40b6-a96c-550c26f7bfd9"
+_COGNITO_URL = "https://cognito-identity.us-east-2.amazonaws.com/"
 
-_HEADERS = {
+_PDF_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/143.0.0.0 Safari/537.36"
     ),
-    "Referer": f"{REGISTRADURIA_BASE_URL}/departamento/05",
+    "Referer": f"{REGISTRADURIA_BASE_URL}/departamento/01",
     "Origin": REGISTRADURIA_BASE_URL,
-    "Accept": "application/json,text/plain,*/*",
+    "Accept": "application/pdf,*/*",
 }
 
-# Corporation code → acronym  (001=SEN, 002=CAM)
 _CORP_ACRONYMS = {"001": "SEN", "002": "CAM"}
 
 
@@ -63,10 +74,115 @@ def _is_pdf(path: Path) -> bool:
 
 
 def _sanitize(name: str) -> str:
-    invalid = r'\/:*?"<>|'
-    for ch in invalid:
+    for ch in r'\/:*?"<>|':
         name = name.replace(ch, "_")
     return name.strip() or "SIN_NOMBRE"
+
+
+# ── AWS SigV4 helpers ──────────────────────────────────────────────────────────
+
+def _hmac_sha256(key: bytes, msg: str) -> bytes:
+    return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+
+def _signing_key(secret_key: str, date_stamp: str, region: str, service: str) -> bytes:
+    k = _hmac_sha256(("AWS4" + secret_key).encode(), date_stamp)
+    k = _hmac_sha256(k, region)
+    k = _hmac_sha256(k, service)
+    return _hmac_sha256(k, "aws4_request")
+
+
+def _sigv4_headers(
+    access_key: str,
+    secret_key: str,
+    session_token: str,
+    body: str,
+) -> dict:
+    t = datetime.now(UTC)
+    amz_date = t.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = t.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(body.encode()).hexdigest()
+
+    canon_headers = (
+        f"content-type:application/json\n"
+        f"host:{_GQL_HOST}\n"
+        f"x-amz-date:{amz_date}\n"
+        f"x-amz-security-token:{session_token}\n"
+    )
+    signed_headers = "content-type;host;x-amz-date;x-amz-security-token"
+    canon_req = "\n".join(
+        ["POST", "/graphql", "", canon_headers, signed_headers, payload_hash]
+    )
+    cred_scope = f"{date_stamp}/{_GQL_REGION}/{_GQL_SERVICE}/aws4_request"
+    string_to_sign = "\n".join(
+        [
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            cred_scope,
+            hashlib.sha256(canon_req.encode()).hexdigest(),
+        ]
+    )
+    sk = _signing_key(secret_key, date_stamp, _GQL_REGION, _GQL_SERVICE)
+    sig = hmac.new(sk, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+    return {
+        "Content-Type": "application/json",
+        "Host": _GQL_HOST,
+        "X-Amz-Date": amz_date,
+        "X-Amz-Security-Token": session_token,
+        "Authorization": (
+            f"AWS4-HMAC-SHA256 Credential={access_key}/{cred_scope}, "
+            f"SignedHeaders={signed_headers}, Signature={sig}"
+        ),
+    }
+
+
+# ── GraphQL queries ────────────────────────────────────────────────────────────
+
+_QUERY_DEPARTMENTS_TREE = """
+query DepartmentsTree($first: Int = 500000) {
+  departmentsTree(first: $first, orderBy: "DEPARTMENT_NAME_ASC") {
+    edges {
+      node {
+        idDepartmentCode
+        departmentName
+        municipalities {
+          municipalityCode
+          municipalityName
+          zones {
+            idZoneCode
+            zoneName
+            stands {
+              standCode
+              standName
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+_QUERY_TRANSMISSION_CODES = """
+query AllTransmissionCodes($first: Int = 100000, $status: Int!) {
+  allTransmissionCodes(
+    first: $first
+    condition: { idTransmissionCodeStatus: $status }
+  ) {
+    nodes {
+      idDepartmentCode
+      municipalityCode
+      idZoneCode
+      standCode
+      numberStand
+      idCorporationCode
+      expectedName
+      idTransmissionCodeStatus
+    }
+  }
+}
+"""
 
 
 class RemotePoller:
@@ -77,47 +193,96 @@ class RemotePoller:
         self._zone_names: dict[str, str] = {}
         self._stand_names: dict[str, str] = {}
         self._catalogs_loaded = False
+        # Cognito credentials cache
+        self._access_key: str = ""
+        self._secret_key: str = ""
+        self._session_token: str = ""
+        self._creds_expiry: datetime = datetime.now(UTC)
 
-    async def _fetch_json(self, client: httpx.AsyncClient, url: str) -> dict | None:
+    async def _get_creds(self, client: httpx.AsyncClient) -> bool:
+        """Fetch/refresh temporary AWS credentials from Cognito Identity Pool."""
+        if self._access_key and datetime.now(UTC) < self._creds_expiry - timedelta(minutes=5):
+            return True  # Still valid
+
+        cognito_headers = {
+            "Content-Type": "application/x-amz-json-1.1",
+            "X-Amz-Target": "AWSCognitoIdentityService.GetId",
+        }
         try:
-            r = await client.get(url, headers=_HEADERS, timeout=30)
-            r.raise_for_status()
-            ct = r.headers.get("content-type", "")
-            if "json" not in ct:
-                log.warning("Expected JSON but got %s from %s", ct, url)
-                return None
-            return r.json()
+            r1 = await client.post(
+                _COGNITO_URL,
+                json={"IdentityPoolId": _IDENTITY_POOL_ID},
+                headers=cognito_headers,
+                timeout=15,
+            )
+            r1.raise_for_status()
+            identity_id = r1.json()["IdentityId"]
+
+            r2 = await client.post(
+                _COGNITO_URL,
+                json={"IdentityId": identity_id},
+                headers={**cognito_headers, "X-Amz-Target": "AWSCognitoIdentityService.GetCredentialsForIdentity"},
+                timeout=15,
+            )
+            r2.raise_for_status()
+            c = r2.json()["Credentials"]
+            self._access_key = c["AccessKeyId"]
+            self._secret_key = c["SecretKey"]
+            self._session_token = c["SessionToken"]
+            # Expiry is ISO8601 string like "2026-03-08T18:22:22Z"
+            expiry_str = c.get("Expiration", "")
+            try:
+                self._creds_expiry = datetime.fromisoformat(expiry_str.replace("Z", "+00:00"))
+            except Exception:
+                self._creds_expiry = datetime.now(UTC) + timedelta(hours=1)
+            return True
         except Exception as exc:
-            log.error("Failed to fetch %s: %s", url, exc)
+            log.error("Cognito credentials failed: %s", exc)
+            return False
+
+    async def _gql(self, client: httpx.AsyncClient, query: str, variables: dict | None = None) -> dict | None:
+        """Execute a GraphQL query against the AppSync endpoint."""
+        body = json.dumps({"query": query, "variables": variables or {}})
+        headers = _sigv4_headers(
+            self._access_key, self._secret_key, self._session_token, body
+        )
+        try:
+            r = await client.post(_GQL_URL, content=body, headers=headers, timeout=60)
+            r.raise_for_status()
+            result = r.json()
+            if "errors" in result:
+                log.error("GraphQL errors: %s", result["errors"])
+                return None
+            return result.get("data")
+        except Exception as exc:
+            log.error("GraphQL request failed: %s", exc)
             return None
 
     async def _load_catalogs(self, client: httpx.AsyncClient) -> bool:
-        """Load name maps from departments/corporations/tree catalogs."""
-        depts = await self._fetch_json(client, f"{_CATALOG_BASE}/allDepartments.json")
-        tree = await self._fetch_json(client, f"{_CATALOG_BASE}/departmentsTree.json")
-
-        if not depts or not tree:
+        """Load name maps from DepartmentsTree GraphQL query."""
+        data = await self._gql(client, _QUERY_DEPARTMENTS_TREE, {"first": 500000})
+        if not data:
             return False
 
-        for d in (depts.get("data", {}).get("allDepartments", {}).get("nodes") or []):
-            code = _zfill(d.get("idDepartmentCode"), 2)
-            self._dept_names[code] = str(d.get("departmentName") or code)
-
-        for edge in (tree.get("data", {}).get("departmentsTree", {}).get("edges") or []):
-            dep = _zfill(edge.get("node", {}).get("idDepartmentCode"), 2)
+        for edge in (data.get("departmentsTree", {}).get("edges") or []):
+            dep = str(edge.get("node", {}).get("idDepartmentCode") or "")
+            self._dept_names[dep] = str(edge.get("node", {}).get("departmentName") or dep)
             for m in (edge.get("node", {}).get("municipalities") or []):
-                mun = _zfill(m.get("municipalityCode"), 3)
+                mun = str(m.get("municipalityCode") or "")
                 self._mun_names[f"{dep}|{mun}"] = str(m.get("municipalityName") or mun)
                 for z in (m.get("zones") or []):
-                    zone2 = _zfill(z.get("idZoneCode"), 2)
+                    zone2 = str(z.get("idZoneCode") or "")
                     self._zone_names[f"{dep}|{mun}|{zone2}"] = str(z.get("zoneName") or zone2)
                     for s in (z.get("stands") or []):
-                        stand2 = _zfill(s.get("standCode"), 2)
+                        stand2 = str(s.get("standCode") or "")
                         self._stand_names[f"{dep}|{mun}|{zone2}|{stand2}"] = str(
                             s.get("standName") or stand2
                         )
 
         self._catalogs_loaded = True
+        log.info("Catalogs loaded: %d depts, %d muns, %d zones, %d stands",
+                 len(self._dept_names), len(self._mun_names),
+                 len(self._zone_names), len(self._stand_names))
         return True
 
     def _target_path(
@@ -146,32 +311,36 @@ class RemotePoller:
         stats = {"fetched": 0, "downloaded": 0, "processed": 0, "skipped": 0, "errors": 0}
 
         async with httpx.AsyncClient(follow_redirects=True) as client:
-            # Load name catalogs on first call or if not loaded yet
-            if not self._catalogs_loaded:
-                if not await self._load_catalogs(client):
-                    log.warning("Catalogs not available yet — data not published")
-                    return stats
-
-            # Fetch transmission catalog
-            tx = await self._fetch_json(client, f"{_CATALOG_BASE}/allTransmissionCodes.json")
-            if not tx:
-                log.warning("allTransmissionCodes.json not available yet")
+            if not await self._get_creds(client):
+                log.warning("Could not obtain AWS credentials — skipping poll")
                 return stats
 
-            nodes: list[dict] = []
-            tx_data = tx.get("data") or {}
-            for key in ("status3", "status11"):
-                block = tx_data.get(key)
-                if block and isinstance(block, dict):
-                    nodes.extend(block.get("nodes") or [])
+            if not self._catalogs_loaded:
+                if not await self._load_catalogs(client):
+                    log.warning("Catalogs not available yet")
+                    return stats
 
-            # Filter: target department only (default=05 Antioquia) + SEN and CAM only
+            # Fetch published transmission codes (status 3 and 11, separate queries to stay under 6MB limit)
+            nodes: list[dict] = []
+            for status in (3, 11):
+                data = await self._gql(
+                    client, _QUERY_TRANSMISSION_CODES, {"first": 100000, "status": status}
+                )
+                if data:
+                    nodes.extend(data.get("allTransmissionCodes", {}).get("nodes") or [])
+                else:
+                    log.warning("allTransmissionCodes status=%s not available", status)
+
+            # Filter: target dept + published (status 3 or 11) + SEN and CAM only
             filtered = []
             for row in nodes:
-                dep = _zfill(row.get("idDepartmentCode"), 2)
+                dep = str(row.get("idDepartmentCode") or "")
                 if DEPT_CODE not in ("ALL", "") and dep != DEPT_CODE:
                     continue
-                corp3 = _zfill(row.get("idCorporationCode"), 3)
+                status = row.get("idTransmissionCodeStatus")
+                if status not in (3, 11):
+                    continue
+                corp3 = str(row.get("idCorporationCode") or "")
                 acronym = _CORP_ACRONYMS.get(corp3)
                 if acronym not in (CORP_SEN, CORP_CAM):
                     continue
@@ -182,16 +351,16 @@ class RemotePoller:
 
             stats["fetched"] = len(filtered)
             if not filtered:
-                log.info("No E14s available for dept=%s yet", DEPT_CODE)
+                log.info("No published E14s available for dept=%s yet", DEPT_CODE)
                 return stats
 
             E14_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
             for row, dep, corp3, acronym, expected in filtered:
-                mun = _zfill(row.get("municipalityCode"), 3)
-                zone2 = _zfill(row.get("idZoneCode"), 2)
-                zone3 = _zfill(row.get("idZoneCode"), 3)
-                stand2 = _zfill(row.get("standCode"), 2)
+                mun = str(row.get("municipalityCode") or "")
+                zone2 = str(row.get("idZoneCode") or "")
+                zone3 = _zfill(zone2, 3)
+                stand2 = str(row.get("standCode") or "")
                 mesa3 = _zfill(row.get("numberStand"), 3)
 
                 unique_key = f"{dep}|{mun}|{zone3}|{stand2}|{mesa3}|{corp3}|{expected}"
@@ -208,12 +377,12 @@ class RemotePoller:
 
                 pdf_url = (
                     f"{_PDF_BASE}/{dep}/{mun}/{zone3}/{stand2}/{mesa3}"
-                    f"/{acronym}/{expected}?uuid={uuid.uuid4()}"
+                    f"/{acronym}/{expected}?uuid={_uuid.uuid4()}"
                 )
 
                 try:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    r = await client.get(pdf_url, headers=_HEADERS, timeout=60)
+                    r = await client.get(pdf_url, headers=_PDF_HEADERS, timeout=60)
                     r.raise_for_status()
 
                     target.write_bytes(r.content)

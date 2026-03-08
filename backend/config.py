@@ -40,8 +40,9 @@ REGISTRADURIA_BASE_URL = "https://divulgacione14congreso.registraduria.gov.co"
 REGISTRADURIA_CATALOGS_URL = f"{REGISTRADURIA_BASE_URL}/assets/temis/divipol_json"
 REGISTRADURIA_PDF_URL = f"{REGISTRADURIA_BASE_URL}/assets/temis/pdf"
 
-# Department filter: "ALL" to process all departments, or a 2-digit code (e.g. "01")
-DEPT_CODE = os.getenv("DEPT_CODE", "ALL")
+# Department filter: "ALL" to process all departments, or a 2-digit code (e.g. "01" = Antioquia)
+# NOTE: Registraduría uses "01" for Antioquia (NOT "05" which is Bolívar in their system)
+DEPT_CODE = os.getenv("DEPT_CODE", "01")
 DEPT_NAME = os.getenv("DEPT_NAME", "TODOS")
 
 # Corporation codes (from allCorporations.json)
