@@ -2,14 +2,12 @@
 from fastapi import APIRouter
 
 from backend.config import (
-    AUTO_SEED_DEMO,
-    DEMO_EXPO_MODE,
     ENABLE_LOCAL_INGEST,
     ENABLE_REMOTE_POLLER,
     SERVE_FRONTEND,
+    SFTP_READY,
 )
 from backend.services.event_bus import event_bus
-from backend.services.demo_data import clear_demo_data, seed_demo_data
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
@@ -17,10 +15,7 @@ router = APIRouter(prefix="/api/system", tags=["system"])
 @router.post("/rescan")
 async def trigger_rescan(limit: int | None = None):
     if not ENABLE_LOCAL_INGEST:
-        return {
-            "status": "disabled",
-            "scan": {"enabled": False, "reason": "local_ingest_disabled"},
-        }
+        return {"status": "disabled", "reason": "local_ingest_disabled"}
 
     from backend.services.local_ingest import scan_local_downloads
 
@@ -31,10 +26,7 @@ async def trigger_rescan(limit: int | None = None):
 @router.post("/poll-once")
 async def remote_poll_once():
     if not ENABLE_REMOTE_POLLER:
-        return {
-            "status": "disabled",
-            "poll": {"enabled": False, "reason": "remote_poller_disabled"},
-        }
+        return {"status": "disabled", "reason": "remote_poller_disabled"}
 
     from backend.services.remote_poller import remote_poller
 
@@ -42,27 +34,37 @@ async def remote_poll_once():
     return {"status": "ok", "poll": stats}
 
 
+@router.post("/sftp-sync")
+async def sftp_sync():
+    """Manually trigger an SFTP download cycle."""
+    if not SFTP_READY:
+        return {
+            "status": "waiting",
+            "reason": "SFTP credentials not configured. Set SFTP_HOST, SFTP_USER, SFTP_PASS.",
+        }
+
+    from backend.services.sftp_downloader import download_new_pdfs
+    from backend.services.local_ingest import ingest_file
+    from pathlib import Path
+
+    new_files = await download_new_pdfs()
+    processed = 0
+    for meta in new_files:
+        ok, _ = await ingest_file(Path(meta["local_path"]))
+        if ok:
+            processed += 1
+
+    return {"status": "ok", "downloaded": len(new_files), "processed": processed}
+
+
 @router.get("/status")
 async def status():
     return {
         "subscribers": event_bus.subscriber_count(),
         "mode": {
-            "demo_expo": DEMO_EXPO_MODE,
             "frontend_served": SERVE_FRONTEND,
-            "auto_seed_demo": AUTO_SEED_DEMO,
             "local_ingest_enabled": ENABLE_LOCAL_INGEST,
             "remote_poller_enabled": ENABLE_REMOTE_POLLER,
+            "sftp_ready": SFTP_READY,
         },
     }
-
-
-@router.post("/demo-seed")
-async def demo_seed(total_mesas: int = 180, clear_first: bool = True, seed: int = 20260304):
-    stats = await seed_demo_data(total_mesas=total_mesas, clear_first=clear_first, seed=seed)
-    return {"status": "ok", "demo": stats}
-
-
-@router.delete("/demo-clear")
-async def demo_clear():
-    stats = await clear_demo_data()
-    return {"status": "ok", "demo": stats}
