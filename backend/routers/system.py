@@ -1,10 +1,14 @@
 """Operational endpoints for scans/poller health."""
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from backend.config import (
+    DEPT_CODE,
+    E14_DOWNLOADS_DIR,
     ENABLE_LOCAL_INGEST,
     ENABLE_REMOTE_POLLER,
     SERVE_FRONTEND,
+    SFTP_HOST,
+    SFTP_POLL_INTERVAL,
     SFTP_READY,
 )
 from backend.services.event_bus import event_bus
@@ -57,6 +61,51 @@ async def sftp_sync():
     return {"status": "ok", "downloaded": len(new_files), "processed": processed}
 
 
+@router.post("/upload-e14")
+async def upload_e14(
+    file: UploadFile = File(...),
+    dept_code: str = Form(...),   # e.g. "29"
+    mun_code: str = Form(...),    # e.g. "001"
+    zona_code: str = Form(...),   # e.g. "01"
+    puesto_code: str = Form(...), # e.g. "01"
+    mesa: int = Form(...),        # e.g. 3
+    corp: str = Form(...),        # "SEN" | "CAM"
+):
+    """Accept a PDF upload and ingest it as if it came from SFTP."""
+    from pathlib import Path
+    from backend.services.local_ingest import ingest_file
+
+    corp = corp.upper()
+    if corp not in ("SEN", "CAM"):
+        raise HTTPException(status_code=400, detail="corp must be SEN or CAM")
+
+    dest_dir = (
+        E14_DOWNLOADS_DIR
+        / f"{dept_code}-UPLOAD"
+        / f"{mun_code}-MUN"
+        / f"{zona_code}-Zona {zona_code}"
+        / f"{puesto_code}-PUESTO"
+    )
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Keep original filename or build a canonical one
+    original_name = file.filename or f"MESA_{mesa:03d}_{corp}_upload.pdf"
+    if not original_name.upper().startswith("MESA_"):
+        original_name = f"MESA_{mesa:03d}_{corp}_{original_name}"
+
+    dest_path = dest_dir / original_name
+    content = await file.read()
+    dest_path.write_bytes(content)
+
+    ok, reason = await ingest_file(dest_path)
+    return {
+        "status": "ok" if ok else "skipped",
+        "reason": reason,
+        "path": str(dest_path.relative_to(E14_DOWNLOADS_DIR)),
+        "size_kb": round(len(content) / 1024, 1),
+    }
+
+
 @router.get("/status")
 async def status():
     return {
@@ -66,5 +115,8 @@ async def status():
             "local_ingest_enabled": ENABLE_LOCAL_INGEST,
             "remote_poller_enabled": ENABLE_REMOTE_POLLER,
             "sftp_ready": SFTP_READY,
+            "sftp_host": SFTP_HOST or None,
+            "sftp_poll_interval_s": SFTP_POLL_INTERVAL,
+            "dept_code_filter": DEPT_CODE,
         },
     }

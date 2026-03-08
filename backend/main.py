@@ -19,9 +19,10 @@ from backend.config import (
     PORT,
     POLL_INTERVAL,
     SERVE_FRONTEND,
+    SFTP_POLL_INTERVAL,
     SFTP_READY,
 )
-from backend.routers import alerts, dashboard, reclamation, settings, sse, system, validation
+from backend.routers import alerts, dashboard, manual_validate, reclamation, settings, sse, system, validation
 from backend.services.comisiones_loader import load as load_comisiones
 from backend.services.divipole_loader import load as load_divipole
 
@@ -47,7 +48,7 @@ async def _sftp_poll_loop(stop_event: asyncio.Event):
                 log.error("SFTP poll error: %s", exc)
 
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL)
+            await asyncio.wait_for(stop_event.wait(), timeout=SFTP_POLL_INTERVAL)
         except asyncio.TimeoutError:
             continue
 
@@ -151,6 +152,7 @@ app.add_middleware(
 app.include_router(dashboard.router)
 app.include_router(alerts.router)
 app.include_router(validation.router)
+app.include_router(manual_validate.router)
 app.include_router(reclamation.router)
 app.include_router(settings.router)
 app.include_router(system.router)

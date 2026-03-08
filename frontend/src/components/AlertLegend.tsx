@@ -6,10 +6,10 @@ export function AlertLegend() {
         <strong>Roja:</strong>
         <small>Diferencia PH Senado vs Camara igual o mayor al 10%.</small>
       </span>
-      <span className="legend-item warning">
-        <img src="/alert-warning.svg" alt="Alerta amarilla" className="alert-logo" />
-        <strong>Amarilla:</strong>
-        <small>Baja confianza OCR, requiere validacion manual.</small>
+      <span className="legend-item info">
+        <span className="alert-dot-info legend-dot" />
+        <strong>Azul:</strong>
+        <small>Novedad reportada por validador manual.</small>
       </span>
     </div>
   );

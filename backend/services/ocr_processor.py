@@ -10,7 +10,6 @@ from backend.config import (
 )
 from backend import database as db
 from backend.services.event_bus import event_bus
-from backend.services import alert_engine
 from backend.services.claude_ocr import process_e14_pdf, normalize_result, validate_result
 
 
@@ -118,8 +117,6 @@ async def process_e14(download_id: int, filepath: str,
             "ph_total_votos": ph_total,
             "confidence": confidence,
         })
-
-        await alert_engine.evaluate_mesa(municipio_cod, zona_cod, puesto_cod, mesa)
 
         return result_id
 

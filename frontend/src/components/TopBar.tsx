@@ -1,20 +1,21 @@
 interface TopBarProps {
   activePage: string;
-  onSelect: (page: "dashboard" | "results" | "map" | "validation" | "settings") => void;
+  onSelect: (page: "dashboard" | "results" | "map" | "novedades" | "settings") => void;
+  novedadesCount?: number;
 }
 
 const pages: Array<{
-  id: "dashboard" | "results" | "map" | "validation" | "settings";
+  id: "dashboard" | "results" | "map" | "novedades" | "settings";
   label: string;
 }> = [
   { id: "dashboard", label: "Dashboard" },
   { id: "results", label: "Resultados" },
   { id: "map", label: "Mapa" },
-  { id: "validation", label: "Validacion" },
+  { id: "novedades", label: "Novedades" },
   { id: "settings", label: "Configuracion" },
 ];
 
-export function TopBar({ activePage, onSelect }: TopBarProps) {
+export function TopBar({ activePage, onSelect, novedadesCount }: TopBarProps) {
   return (
     <header className="topbar">
       <div className="topbar-gradient" />
@@ -36,6 +37,9 @@ export function TopBar({ activePage, onSelect }: TopBarProps) {
               onClick={() => onSelect(page.id)}
             >
               {page.label}
+              {page.id === "novedades" && novedadesCount != null && novedadesCount > 0 && (
+                <span className="nav-badge">{novedadesCount}</span>
+              )}
             </button>
           ))}
         </nav>
@@ -45,4 +49,3 @@ export function TopBar({ activePage, onSelect }: TopBarProps) {
     </header>
   );
 }
-

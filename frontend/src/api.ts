@@ -4,6 +4,7 @@ import type {
   DashboardSummary,
   MapItem,
   MunicipioNode,
+  NovedadItem,
   ReclamationRequest,
   UserSettings,
   ValidationResponse,
@@ -127,6 +128,25 @@ export async function saveUserSettings(payload: UserSettings): Promise<void> {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+export async function getNovedades(): Promise<NovedadItem[]> {
+  return fetchJson<NovedadItem[]>("/api/validar/novedades");
+}
+
+export async function downloadNovedadesExport(): Promise<void> {
+  const response = await fetch(withBase("/api/validar/novedades/export"));
+  if (!response.ok) throw new Error(`${response.status}`);
+  const blob = await response.blob();
+  const fileName = parseFileName(response.headers, "novedades.xlsx");
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 }
 
 export async function triggerRescan(limit?: number): Promise<void> {

@@ -138,6 +138,46 @@ CREATE TABLE IF NOT EXISTS user_settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    is_active INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS manual_validations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    municipio_cod TEXT NOT NULL,
+    zona_cod TEXT NOT NULL,
+    puesto_cod TEXT NOT NULL,
+    mesa INTEGER NOT NULL,
+    corporacion TEXT NOT NULL,
+    validated_by TEXT NOT NULL,
+    action TEXT NOT NULL,
+    corrected_ph_votes INTEGER,
+    novelty_note TEXT,
+    validated_at TEXT NOT NULL,
+    UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+);
+
+CREATE TABLE IF NOT EXISTS queue_claims (
+    municipio_cod TEXT NOT NULL,
+    zona_cod TEXT NOT NULL,
+    puesto_cod TEXT NOT NULL,
+    mesa INTEGER NOT NULL,
+    corporacion TEXT NOT NULL,
+    claimed_by TEXT NOT NULL,
+    claimed_at TEXT NOT NULL,
+    UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, corporacion),
+    UNIQUE(claimed_by)
+);
+
 CREATE INDEX IF NOT EXISTS idx_e14_results_location ON e14_results(municipio_cod, zona_cod, puesto_cod);
 CREATE INDEX IF NOT EXISTS idx_alerts_location ON alerts(municipio_cod, zona_cod, puesto_cod);
 CREATE INDEX IF NOT EXISTS idx_alerts_unresolved ON alerts(is_resolved) WHERE is_resolved = 0;
@@ -553,7 +593,8 @@ async def get_dashboard_summary() -> dict:
             (SELECT COUNT(*) FROM alerts WHERE is_resolved=0) as alerts_total,
             (SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND severity='danger') as alerts_danger,
             (SELECT COUNT(*) FROM alerts WHERE is_resolved=0 AND severity='warning') as alerts_warning,
-            (SELECT COUNT(*) FROM alerts WHERE is_resolved=1) as alerts_resolved
+            (SELECT COUNT(*) FROM alerts WHERE is_resolved=1) as alerts_resolved,
+            (SELECT COUNT(*) FROM manual_validations WHERE novelty_note IS NOT NULL AND novelty_note != '') as novedades_count
     """)
     r = row[0]
     return {
@@ -567,6 +608,7 @@ async def get_dashboard_summary() -> dict:
         "alerts_danger": r[8] or 0,
         "alerts_warning": r[9] or 0,
         "alerts_resolved": r[10] or 0,
+        "novedades_count": r[11] or 0,
     }
 
 
@@ -638,7 +680,13 @@ async def get_hierarchy() -> list[dict]:
                         rc.status as cam_status,
                         rs.ocr_confidence as sen_conf,
                         rc.ocr_confidence as cam_conf,
-                        a.alert_type, a.severity, a.discrepancy_pct
+                        a.alert_type, a.severity, a.discrepancy_pct,
+                        CASE WHEN EXISTS (
+                            SELECT 1 FROM manual_validations mv2
+                            WHERE mv2.municipio_cod = ? AND mv2.zona_cod = ?
+                              AND mv2.puesto_cod = ? AND mv2.mesa = m.mesa
+                              AND mv2.novelty_note IS NOT NULL AND mv2.novelty_note != ''
+                        ) THEN 1 ELSE 0 END as has_novelty
                     FROM (
                         SELECT DISTINCT mesa FROM e14_downloads
                         WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
@@ -652,8 +700,10 @@ async def get_hierarchy() -> list[dict]:
                     LEFT JOIN alerts a ON a.municipio_cod = ?
                         AND a.zona_cod = ? AND a.puesto_cod = ?
                         AND a.mesa = m.mesa AND a.is_resolved = 0
+                        AND a.severity != 'info'
                     ORDER BY m.mesa
                 """, (mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
+                      mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
                       mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
                       mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
                       mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"]))
@@ -798,13 +848,14 @@ async def get_map_data() -> list[dict]:
             p.id, p.municipio, p.municipio_cod, p.zona_cod, p.puesto_cod,
             p.nombre, p.mesas, p.lat, p.lon,
             COUNT(DISTINCT CASE WHEN a.severity='danger' AND a.is_resolved=0 THEN a.id END) as danger_count,
-            COUNT(DISTINCT CASE WHEN a.severity='warning' AND a.is_resolved=0 THEN a.id END) as warning_count
+            COUNT(DISTINCT CASE WHEN a.severity='warning' AND a.is_resolved=0 THEN a.id END) as warning_count,
+            COUNT(DISTINCT CASE WHEN a.severity='info' AND a.is_resolved=0 THEN a.id END) as novelty_count
         FROM puestos p
         LEFT JOIN alerts a ON a.municipio_cod = p.municipio_cod
             AND a.zona_cod = p.zona_cod AND a.puesto_cod = p.puesto_cod
         WHERE p.departamento = 'ANTIOQUIA' AND p.lat IS NOT NULL
         GROUP BY p.id
-        HAVING danger_count > 0 OR warning_count > 0
+        HAVING danger_count > 0 OR warning_count > 0 OR novelty_count > 0
     """)
     return [dict(r) for r in rows]
 
@@ -1061,3 +1112,304 @@ async def set_setting(key: str, value: str):
         "INSERT OR REPLACE INTO user_settings (key, value) VALUES (?, ?)",
         (key, value))
     await db.commit()
+
+
+# --- Auth / User management ---
+
+async def create_user(username: str, password_hash: str) -> bool:
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (username, password_hash),
+        )
+        await db.commit()
+        return True
+    except Exception:
+        return False
+
+
+async def get_user(username: str) -> dict | None:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id, username, password_hash, is_active FROM users WHERE username = ?",
+        (username,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+async def create_session(token: str, username: str):
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO sessions (token, username, created_at) VALUES (?, ?, ?)",
+        (token, username, datetime.now().isoformat()),
+    )
+    await db.commit()
+
+
+async def get_session(token: str) -> str | None:
+    """Return username for a valid session token, or None."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT username FROM sessions WHERE token = ?", (token,)
+    )
+    return rows[0]["username"] if rows else None
+
+
+async def delete_session(token: str):
+    db = await get_db()
+    await db.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    await db.commit()
+
+
+# --- Manual validations ---
+
+async def get_next_unvalidated(username: str) -> dict | None:
+    """Return the item claimed by this user, or claim the next available one."""
+    db = await get_db()
+
+    # 1. Return existing claim for this user if any
+    claimed = await db.execute_fetchall(
+        """
+        SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
+               r.corporacion, r.ph_total_votos, r.ph_votos_lista,
+               r.votos_urna, r.ocr_confidence, r.processed_at,
+               d.filepath,
+               p.municipio, p.nombre as puesto_nombre
+        FROM queue_claims qc
+        JOIN e14_results r
+            ON r.municipio_cod = qc.municipio_cod
+            AND r.zona_cod = qc.zona_cod
+            AND r.puesto_cod = qc.puesto_cod
+            AND r.mesa = qc.mesa
+            AND r.corporacion = qc.corporacion
+        JOIN e14_downloads d ON d.id = r.download_id
+        LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
+            AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+        WHERE qc.claimed_by = ?
+        LIMIT 1
+        """,
+        (username,),
+    )
+    if claimed:
+        r = dict(claimed[0])
+        mun, zona, puesto, mesa, corp = (
+            r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
+        )
+        r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
+        return r
+
+    # 2. Find next unclaimed, unvalidated item
+    rows = await db.execute_fetchall(
+        """
+        SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
+               r.corporacion, r.ph_total_votos, r.ph_votos_lista,
+               r.votos_urna, r.ocr_confidence, r.processed_at,
+               d.filepath,
+               p.municipio, p.nombre as puesto_nombre
+        FROM e14_results r
+        JOIN e14_downloads d ON d.id = r.download_id
+        LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
+            AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+        LEFT JOIN manual_validations mv
+            ON mv.municipio_cod = r.municipio_cod
+            AND mv.zona_cod = r.zona_cod
+            AND mv.puesto_cod = r.puesto_cod
+            AND mv.mesa = r.mesa
+            AND mv.corporacion = r.corporacion
+        LEFT JOIN queue_claims qc
+            ON qc.municipio_cod = r.municipio_cod
+            AND qc.zona_cod = r.zona_cod
+            AND qc.puesto_cod = r.puesto_cod
+            AND qc.mesa = r.mesa
+            AND qc.corporacion = r.corporacion
+        WHERE r.status IN ('processed', 'corrected')
+          AND mv.id IS NULL
+          AND qc.claimed_by IS NULL
+        ORDER BY r.processed_at DESC
+        LIMIT 1
+        """
+    )
+    if not rows:
+        return None
+
+    r = dict(rows[0])
+    mun, zona, puesto, mesa, corp = (
+        r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
+    )
+
+    # 3. Claim it for this user
+    await db.execute(
+        """
+        INSERT INTO queue_claims
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion, claimed_by, claimed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(claimed_by) DO UPDATE SET
+            municipio_cod = excluded.municipio_cod,
+            zona_cod = excluded.zona_cod,
+            puesto_cod = excluded.puesto_cod,
+            mesa = excluded.mesa,
+            corporacion = excluded.corporacion,
+            claimed_at = excluded.claimed_at
+        """,
+        (mun, zona, puesto, mesa, corp, username, datetime.now().isoformat()),
+    )
+    await db.commit()
+
+    r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
+    return r
+
+
+async def release_claim(username: str):
+    """Release the queue claim held by this user."""
+    db = await get_db()
+    await db.execute("DELETE FROM queue_claims WHERE claimed_by = ?", (username,))
+    await db.commit()
+
+
+async def get_validation_stats() -> dict:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM e14_results
+             WHERE status IN ('processed', 'corrected')) AS total_processed,
+            (SELECT COUNT(*) FROM manual_validations) AS total_validated,
+            (SELECT COUNT(*) FROM manual_validations WHERE action = 'corrected') AS total_corrected,
+            (SELECT COUNT(*) FROM manual_validations WHERE novelty_note IS NOT NULL) AS total_novelty
+        """
+    )
+    r = rows[0]
+    return {
+        "total_processed": r[0] or 0,
+        "total_validated": r[1] or 0,
+        "pending": max(0, (r[0] or 0) - (r[1] or 0)),
+        "total_corrected": r[2] or 0,
+        "total_novelty": r[3] or 0,
+    }
+
+
+async def submit_validation(data: dict):
+    db = await get_db()
+    mun = data["municipio_cod"]
+    zona = data["zona_cod"]
+    puesto = data["puesto_cod"]
+    mesa = data["mesa"]
+    corp = data["corporacion"]
+
+    await db.execute(
+        """
+        INSERT INTO manual_validations
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             validated_by, action, corrected_ph_votes, novelty_note, validated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+        DO UPDATE SET
+            validated_by = excluded.validated_by,
+            action = excluded.action,
+            corrected_ph_votes = excluded.corrected_ph_votes,
+            novelty_note = excluded.novelty_note,
+            validated_at = excluded.validated_at
+        """,
+        (
+            mun, zona, puesto, mesa, corp,
+            data["validated_by"],
+            data["action"],
+            data.get("corrected_ph_votes"),
+            data.get("novelty_note"),
+            datetime.now().isoformat(),
+        ),
+    )
+
+    # If corrected, update the result row
+    if data["action"] == "corrected" and data.get("corrected_ph_votes") is not None:
+        await db.execute(
+            """
+            UPDATE e14_results SET
+                ph_total_votos = ?,
+                status = 'corrected',
+                corrected_by = ?,
+                corrected_at = ?
+            WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+              AND mesa = ? AND corporacion = ?
+            """,
+            (
+                data["corrected_ph_votes"],
+                data["validated_by"],
+                datetime.now().isoformat(),
+                mun, zona, puesto, mesa, corp,
+            ),
+        )
+
+    # Release the claim so the next item can be assigned
+    await db.execute(
+        "DELETE FROM queue_claims WHERE claimed_by = ?",
+        (data["validated_by"],),
+    )
+
+    await db.commit()
+
+
+async def get_novelty_reports() -> list[dict]:
+    """Return all manual validations that have a novelty note, with full mesa info."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """
+        SELECT
+            mv.id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod, mv.mesa,
+            mv.corporacion, mv.validated_by, mv.action,
+            mv.corrected_ph_votes, mv.novelty_note, mv.validated_at,
+            r.ph_total_votos as ai_ph_votes,
+            r.votos_urna,
+            r.ocr_confidence,
+            p.municipio,
+            p.nombre as puesto_nombre,
+            p.departamento
+        FROM manual_validations mv
+        JOIN e14_results r
+            ON r.municipio_cod = mv.municipio_cod
+            AND r.zona_cod = mv.zona_cod
+            AND r.puesto_cod = mv.puesto_cod
+            AND r.mesa = mv.mesa
+            AND r.corporacion = mv.corporacion
+        LEFT JOIN puestos p
+            ON p.municipio_cod = mv.municipio_cod
+            AND p.zona_cod = mv.zona_cod
+            AND p.puesto_cod = mv.puesto_cod
+        WHERE mv.novelty_note IS NOT NULL AND mv.novelty_note != ''
+        ORDER BY mv.validated_at DESC
+        """
+    )
+    return [dict(r) for r in rows]
+
+
+async def add_novelty_note(mun: str, zona: str, puesto: str, mesa: int,
+                            corp: str, username: str, note: str):
+    """Add/update novelty note on an existing validation, or create one if absent."""
+    db = await get_db()
+    await db.execute(
+        """
+        INSERT INTO manual_validations
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             validated_by, action, novelty_note, validated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'novelty', ?, ?)
+        ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+        DO UPDATE SET
+            novelty_note = excluded.novelty_note,
+            validated_at = excluded.validated_at
+        """,
+        (mun, zona, puesto, mesa, corp, username, note, datetime.now().isoformat()),
+    )
+    await db.commit()
+
+    # Create/update a blue alert so novelties appear on map and hierarchy table
+    await upsert_alert({
+        "municipio_cod": mun,
+        "zona_cod": zona,
+        "puesto_cod": puesto,
+        "mesa": mesa,
+        "alert_type": f"novelty_{corp}",
+        "severity": "info",
+        "description": f"Novedad ({corp}) reportada por {username}: {note[:200]}",
+        "created_at": datetime.now().isoformat(),
+    })

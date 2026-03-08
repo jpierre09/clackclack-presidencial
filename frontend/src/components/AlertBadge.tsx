@@ -1,11 +1,12 @@
 interface AlertBadgeProps {
   danger: number;
   warning?: number;
+  novelty?: number;
   compact?: boolean;
 }
 
-export function AlertBadge({ danger, warning = 0, compact = false }: AlertBadgeProps) {
-  const total = danger + warning;
+export function AlertBadge({ danger, warning = 0, novelty = 0, compact = false }: AlertBadgeProps) {
+  const total = danger + warning + novelty;
   if (total === 0) {
     return <span className="alert-badge empty">Sin alertas</span>;
   }
@@ -24,6 +25,13 @@ export function AlertBadge({ danger, warning = 0, compact = false }: AlertBadgeP
           <img src="/alert-warning.svg" alt="Alerta amarilla" className="alert-logo" />
           <strong className="alert-count">{warning}</strong>
           {!compact ? <small className="alert-label">amarillas</small> : null}
+        </span>
+      ) : null}
+      {novelty > 0 ? (
+        <span className="alert-token info">
+          <span className="alert-dot-info" />
+          <strong className="alert-count">{novelty}</strong>
+          {!compact ? <small className="alert-label">novedades</small> : null}
         </span>
       ) : null}
     </span>

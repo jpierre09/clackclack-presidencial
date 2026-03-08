@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from backend.config import (
+    DEPT_CODE,
     E14_DOWNLOADS_DIR,
     SFTP_HOST, SFTP_PORT, SFTP_USER, SFTP_PASS, SFTP_KEY_PATH, SFTP_PATH,
     SFTP_READY,
@@ -98,6 +99,10 @@ async def download_new_pdfs() -> list[dict]:
                 continue
             meta = parse_filename(fname)
             if meta is None:
+                continue
+
+            # Filter by department — skip files that don't match DEPT_CODE
+            if DEPT_CODE not in ("ALL", "") and meta["departamento_cod"] != DEPT_CODE:
                 continue
 
             # Save in the directory structure expected by local_ingest.py:

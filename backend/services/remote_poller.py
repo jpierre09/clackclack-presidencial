@@ -1,15 +1,20 @@
-"""Remote poller for Registraduria transmission catalogs.
+"""HTTP downloader for E-14 PDFs from Registraduría public API.
 
-The source endpoint may be rate-limited or protected depending on election day infrastructure.
-This service is optional and disabled by default.
+Polls:
+  GET /assets/temis/divipol_json/allTransmissionCodes.json  → status3 + status11 nodes
+  GET /assets/temis/divipol_json/allDepartments.json
+  GET /assets/temis/divipol_json/allCorporations.json
+  GET /assets/temis/divipol_json/departmentsTree.json
+
+PDF URL pattern:
+  /assets/temis/pdf/{dep}/{mun}/{zone3}/{stand2}/{mesa3}/{acronym}/{expectedName}?uuid={uuid}
 """
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
+import logging
+import uuid
 from pathlib import Path
-from typing import Any
 
 import httpx
 
@@ -20,178 +25,234 @@ from backend.config import (
     DEPT_CODE,
     E14_DOWNLOADS_DIR,
     POLL_INTERVAL,
-    REGISTRADURIA_CATALOGS_URL,
     REGISTRADURIA_BASE_URL,
 )
-from backend.services.downloader import DEFAULT_HEADERS, download_pdf
 from backend.services.event_bus import event_bus
 from backend.services.local_ingest import ingest_file
 
+log = logging.getLogger(__name__)
 
-CATALOG_URL = f"{REGISTRADURIA_CATALOGS_URL}/allTransmissionCodes.json"
+_CATALOG_BASE = f"{REGISTRADURIA_BASE_URL}/assets/temis/divipol_json"
+_PDF_BASE = f"{REGISTRADURIA_BASE_URL}/assets/temis/pdf"
+
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/143.0.0.0 Safari/537.36"
+    ),
+    "Referer": f"{REGISTRADURIA_BASE_URL}/departamento/05",
+    "Origin": REGISTRADURIA_BASE_URL,
+    "Accept": "application/json,text/plain,*/*",
+}
+
+# Corporation code → acronym  (001=SEN, 002=CAM)
+_CORP_ACRONYMS = {"001": "SEN", "002": "CAM"}
+
+
+def _zfill(value, n: int) -> str:
+    s = str(value or "")
+    return s.zfill(n) if s.isdigit() else s
+
+
+def _is_pdf(path: Path) -> bool:
+    try:
+        return path.read_bytes()[:5] == b"%PDF-"
+    except OSError:
+        return False
+
+
+def _sanitize(name: str) -> str:
+    invalid = r'\/:*?"<>|'
+    for ch in invalid:
+        name = name.replace(ch, "_")
+    return name.strip() or "SIN_NOMBRE"
 
 
 class RemotePoller:
     def __init__(self):
         self._known_keys: set[str] = set()
+        self._dept_names: dict[str, str] = {}
+        self._mun_names: dict[str, str] = {}
+        self._zone_names: dict[str, str] = {}
+        self._stand_names: dict[str, str] = {}
+        self._catalogs_loaded = False
 
-    @staticmethod
-    def _normalize_corp(raw: str | None) -> str | None:
-        if not raw:
+    async def _fetch_json(self, client: httpx.AsyncClient, url: str) -> dict | None:
+        try:
+            r = await client.get(url, headers=_HEADERS, timeout=30)
+            r.raise_for_status()
+            ct = r.headers.get("content-type", "")
+            if "json" not in ct:
+                log.warning("Expected JSON but got %s from %s", ct, url)
+                return None
+            return r.json()
+        except Exception as exc:
+            log.error("Failed to fetch %s: %s", url, exc)
             return None
-        value = raw.upper()
-        if "SEN" in value:
-            return CORP_SEN
-        if "CAM" in value:
-            return CORP_CAM
-        return None
 
-    @staticmethod
-    def _extract_candidates(payload: Any) -> list[dict]:
-        candidates: list[dict] = []
+    async def _load_catalogs(self, client: httpx.AsyncClient) -> bool:
+        """Load name maps from departments/corporations/tree catalogs."""
+        depts = await self._fetch_json(client, f"{_CATALOG_BASE}/allDepartments.json")
+        tree = await self._fetch_json(client, f"{_CATALOG_BASE}/departmentsTree.json")
 
-        def walk(node: Any):
-            if isinstance(node, dict):
-                keys = {k.lower(): k for k in node.keys()}
-                maybe_url = None
-                for key in ("url", "pdf", "pdf_url", "archivo", "file", "path", "href"):
-                    if key in keys:
-                        maybe_url = str(node[keys[key]])
-                        break
+        if not depts or not tree:
+            return False
 
-                dep = (
-                    node.get(keys.get("departamento"))
-                    or node.get(keys.get("departamento_cod"))
-                    or node.get(keys.get("codigodepartamento"))
-                    or node.get(keys.get("dd"))
-                    or node.get(keys.get("dep"))
-                )
-                mun = (
-                    node.get(keys.get("municipio_cod"))
-                    or node.get(keys.get("codigomunicipio"))
-                    or node.get(keys.get("mm"))
-                    or node.get(keys.get("mun"))
-                )
-                zona = node.get(keys.get("zona")) or node.get(keys.get("zz"))
-                puesto = node.get(keys.get("puesto")) or node.get(keys.get("pp"))
-                mesa = node.get(keys.get("mesa"))
-                corp = (
-                    node.get(keys.get("corporacion"))
-                    or node.get(keys.get("acronimo"))
-                    or node.get(keys.get("corp"))
-                    or node.get(keys.get("corp_alias"))
-                )
+        for d in (depts.get("data", {}).get("allDepartments", {}).get("nodes") or []):
+            code = _zfill(d.get("idDepartmentCode"), 2)
+            self._dept_names[code] = str(d.get("departmentName") or code)
 
-                if maybe_url and dep is not None and mun is not None and zona is not None and puesto is not None and mesa is not None:
-                    candidates.append(
-                        {
-                            "url": maybe_url,
-                            "departamento_cod": str(dep).zfill(2),
-                            "municipio_cod": str(mun).zfill(3),
-                            "zona_cod": str(zona).zfill(2),
-                            "puesto_cod": str(puesto).zfill(2),
-                            "mesa": int(str(mesa).strip()),
-                            "corporacion": str(corp or ""),
-                        }
-                    )
+        for edge in (tree.get("data", {}).get("departmentsTree", {}).get("edges") or []):
+            dep = _zfill(edge.get("node", {}).get("idDepartmentCode"), 2)
+            for m in (edge.get("node", {}).get("municipalities") or []):
+                mun = _zfill(m.get("municipalityCode"), 3)
+                self._mun_names[f"{dep}|{mun}"] = str(m.get("municipalityName") or mun)
+                for z in (m.get("zones") or []):
+                    zone2 = _zfill(z.get("idZoneCode"), 2)
+                    self._zone_names[f"{dep}|{mun}|{zone2}"] = str(z.get("zoneName") or zone2)
+                    for s in (z.get("stands") or []):
+                        stand2 = _zfill(s.get("standCode"), 2)
+                        self._stand_names[f"{dep}|{mun}|{zone2}|{stand2}"] = str(
+                            s.get("standName") or stand2
+                        )
 
-                for value in node.values():
-                    walk(value)
-            elif isinstance(node, list):
-                for item in node:
-                    walk(item)
+        self._catalogs_loaded = True
+        return True
 
-        walk(payload)
-
-        # Deduplicate extracted rows
-        uniq = {}
-        for candidate in candidates:
-            key = (
-                candidate["departamento_cod"],
-                candidate["municipio_cod"],
-                candidate["zona_cod"],
-                candidate["puesto_cod"],
-                candidate["mesa"],
-                candidate["corporacion"],
-                candidate["url"],
-            )
-            uniq[key] = candidate
-        return list(uniq.values())
+    def _target_path(
+        self,
+        dep: str, mun: str, zone2: str, stand2: str,
+        mesa3: str, acronym: str, expected_name: str,
+    ) -> Path:
+        dep_label = _sanitize(f"{dep}-{self._dept_names.get(dep, dep)}")
+        mun_label = _sanitize(f"{mun}-{self._mun_names.get(f'{dep}|{mun}', mun)}")
+        zone_label = _sanitize(
+            f"{zone2}-{self._zone_names.get(f'{dep}|{mun}|{zone2}', zone2)}"
+        )
+        stand_label = _sanitize(
+            f"{stand2}-{self._stand_names.get(f'{dep}|{mun}|{zone2}|{stand2}', stand2)}"
+        )
+        sub = (
+            E14_DOWNLOADS_DIR
+            / dep_label
+            / mun_label
+            / zone_label
+            / stand_label
+        )
+        return sub / f"MESA_{mesa3}_{acronym}_{expected_name}"
 
     async def poll_once(self) -> dict:
-        try:
-            async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=DEFAULT_HEADERS) as client:
-                response = await client.get(CATALOG_URL)
-                response.raise_for_status()
-                payload = response.json()
-        except Exception as exc:
-            await event_bus.publish("remote_poll_error", {"error": str(exc)})
-            return {"fetched": 0, "downloaded": 0, "processed": 0, "errors": 1}
+        stats = {"fetched": 0, "downloaded": 0, "processed": 0, "skipped": 0, "errors": 0}
 
-        candidates = self._extract_candidates(payload)
-        filtered = [
-            c for c in candidates
-            if c["departamento_cod"] == DEPT_CODE and self._normalize_corp(c["corporacion"]) in {CORP_SEN, CORP_CAM}
-        ]
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            # Load name catalogs on first call or if not loaded yet
+            if not self._catalogs_loaded:
+                if not await self._load_catalogs(client):
+                    log.warning("Catalogs not available yet — data not published")
+                    return stats
 
-        downloaded = 0
-        processed = 0
-        errors = 0
+            # Fetch transmission catalog
+            tx = await self._fetch_json(client, f"{_CATALOG_BASE}/allTransmissionCodes.json")
+            if not tx:
+                log.warning("allTransmissionCodes.json not available yet")
+                return stats
 
-        for row in filtered:
-            corp = self._normalize_corp(row["corporacion"]) or "UNK"
-            if corp not in {CORP_SEN, CORP_CAM}:
-                continue
+            nodes: list[dict] = []
+            tx_data = tx.get("data") or {}
+            for key in ("status3", "status11"):
+                block = tx_data.get(key)
+                if block and isinstance(block, dict):
+                    nodes.extend(block.get("nodes") or [])
 
-            url = row["url"]
-            if url.startswith("/"):
-                url = f"{REGISTRADURIA_BASE_URL}{url}"
-            elif not url.startswith("http"):
-                url = f"{REGISTRADURIA_BASE_URL.rstrip('/')}/{url.lstrip('/')}"
+            # Filter: target department only (default=05 Antioquia) + SEN and CAM only
+            filtered = []
+            for row in nodes:
+                dep = _zfill(row.get("idDepartmentCode"), 2)
+                if DEPT_CODE not in ("ALL", "") and dep != DEPT_CODE:
+                    continue
+                corp3 = _zfill(row.get("idCorporationCode"), 3)
+                acronym = _CORP_ACRONYMS.get(corp3)
+                if acronym not in (CORP_SEN, CORP_CAM):
+                    continue
+                expected = str(row.get("expectedName") or "").strip()
+                if not expected:
+                    continue
+                filtered.append((row, dep, corp3, acronym, expected))
 
-            unique_key = (
-                f"{row['municipio_cod']}-{row['zona_cod']}-{row['puesto_cod']}-"
-                f"{row['mesa']}-{corp}-{hashlib.sha1(url.encode('utf-8')).hexdigest()[:10]}"
-            )
-            if unique_key in self._known_keys:
-                continue
+            stats["fetched"] = len(filtered)
+            if not filtered:
+                log.info("No E14s available for dept=%s yet", DEPT_CODE)
+                return stats
 
-            target = (
-                E14_DOWNLOADS_DIR
-                / f"{DEPT_CODE}-ANTIOQUIA"
-                / f"{row['municipio_cod']}-MUNICIPIO"
-                / f"{row['zona_cod']}-Zona {row['zona_cod']}"
-                / f"{row['puesto_cod']}-PUESTO"
-                / f"MESA_{row['mesa']:03d}_{corp}_{hashlib.sha1(url.encode('utf-8')).hexdigest()[:16]}.pdf"
-            )
+            E14_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-            ok = await download_pdf(url, target)
-            if not ok:
-                errors += 1
-                continue
+            for row, dep, corp3, acronym, expected in filtered:
+                mun = _zfill(row.get("municipalityCode"), 3)
+                zone2 = _zfill(row.get("idZoneCode"), 2)
+                zone3 = _zfill(row.get("idZoneCode"), 3)
+                stand2 = _zfill(row.get("standCode"), 2)
+                mesa3 = _zfill(row.get("numberStand"), 3)
 
-            downloaded += 1
-            self._known_keys.add(unique_key)
+                unique_key = f"{dep}|{mun}|{zone3}|{stand2}|{mesa3}|{corp3}|{expected}"
+                if unique_key in self._known_keys:
+                    stats["skipped"] += 1
+                    continue
 
-            try:
-                processed_flag, _ = await ingest_file(target)
-                if processed_flag:
-                    processed += 1
-            except Exception:
-                errors += 1
+                target = self._target_path(dep, mun, zone2, stand2, mesa3, acronym, expected)
 
-        stats = {
-            "fetched": len(filtered),
-            "downloaded": downloaded,
-            "processed": processed,
-            "errors": errors,
-        }
+                if target.exists() and _is_pdf(target):
+                    self._known_keys.add(unique_key)
+                    stats["skipped"] += 1
+                    continue
+
+                pdf_url = (
+                    f"{_PDF_BASE}/{dep}/{mun}/{zone3}/{stand2}/{mesa3}"
+                    f"/{acronym}/{expected}?uuid={uuid.uuid4()}"
+                )
+
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    r = await client.get(pdf_url, headers=_HEADERS, timeout=60)
+                    r.raise_for_status()
+
+                    target.write_bytes(r.content)
+
+                    if not _is_pdf(target):
+                        target.unlink(missing_ok=True)
+                        log.warning("Not a valid PDF: %s", pdf_url)
+                        stats["errors"] += 1
+                        continue
+
+                    self._known_keys.add(unique_key)
+                    stats["downloaded"] += 1
+                    log.info("Downloaded: %s", target.name)
+
+                except Exception as exc:
+                    log.error("Failed to download %s: %s", pdf_url, exc)
+                    target.unlink(missing_ok=True)
+                    stats["errors"] += 1
+                    continue
+
+                try:
+                    ok, _ = await ingest_file(target)
+                    if ok:
+                        stats["processed"] += 1
+                except Exception as exc:
+                    log.error("Ingest failed for %s: %s", target, exc)
+                    stats["errors"] += 1
+
         await event_bus.publish("remote_poll_complete", stats)
         return stats
 
     async def loop(self, stop_event: asyncio.Event):
         while not stop_event.is_set():
-            await self.poll_once()
+            try:
+                result = await self.poll_once()
+                log.info("Poll complete: %s", result)
+            except Exception as exc:
+                log.error("Poll loop error: %s", exc)
+
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=POLL_INTERVAL)
             except asyncio.TimeoutError:

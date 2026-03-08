@@ -9,12 +9,7 @@ import type { MesaData, MunicipioNode, PuestoNode, ZonaNode } from "../types";
 interface DashboardPageProps {
   hierarchy: MunicipioNode[];
   selectedMunicipio: string;
-  onOpenValidation: (selection: {
-    municipio_cod: string;
-    zona_cod: string;
-    puesto_cod: string;
-    mesa: number;
-  }) => void;
+  onOpenValidation: () => void;
 }
 
 function getMesaDiscrepancy(mesa: MesaData): number | null {
@@ -47,7 +42,7 @@ function countAlertsFromZona(zona: ZonaNode): { danger: number; warning: number 
   );
 }
 
-export function DashboardPage({ hierarchy, selectedMunicipio, onOpenValidation }: DashboardPageProps) {
+export function DashboardPage({ hierarchy, selectedMunicipio }: DashboardPageProps) {
   const [expandedMunicipios, setExpandedMunicipios] = useState<Set<string>>(new Set());
   const [expandedZonas, setExpandedZonas] = useState<Set<string>>(new Set());
   const [expandedPuestos, setExpandedPuestos] = useState<Set<string>>(new Set());
@@ -211,12 +206,13 @@ export function DashboardPage({ hierarchy, selectedMunicipio, onOpenValidation }
                                         const discrepancy = getMesaDiscrepancy(mesa);
                                         const severity = mesa.severity || "warning";
                                         return (
-                                          <div key={mesa.mesa} className={`mesa-card ${severity}`}>
+                                          <div key={mesa.mesa} className={`mesa-card ${severity}${mesa.has_novelty ? " has-novelty" : ""}`}>
                                             <div className="mesa-head">
                                               <strong>Mesa {mesa.mesa}</strong>
                                               <AlertBadge
                                                 danger={mesa.severity === "danger" ? 1 : 0}
                                                 warning={mesa.severity === "warning" ? 1 : 0}
+                                                novelty={mesa.has_novelty ? 1 : 0}
                                                 compact
                                               />
                                             </div>
@@ -235,20 +231,14 @@ export function DashboardPage({ hierarchy, selectedMunicipio, onOpenValidation }
                                               <strong>{discrepancy !== null ? `${discrepancy}%` : "-"}</strong>
                                             </div>
                                             <div className="mesa-actions">
-                                              <button
-                                                type="button"
+                                              <a
+                                                href="/validar"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
                                                 className="action-btn"
-                                                onClick={() =>
-                                                  onOpenValidation({
-                                                    municipio_cod: municipio.municipio_cod,
-                                                    zona_cod: zona.zona_cod,
-                                                    puesto_cod: puesto.puesto_cod,
-                                                    mesa: mesa.mesa,
-                                                  })
-                                                }
                                               >
                                                 Validar
-                                              </button>
+                                              </a>
                                               <button
                                                 type="button"
                                                 className="action-btn danger"

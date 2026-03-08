@@ -1,4 +1,4 @@
-export type Severity = "danger" | "warning";
+export type Severity = "danger" | "warning" | "info";
 
 export interface DashboardSummary {
   total_mesas: number;
@@ -11,6 +11,27 @@ export interface DashboardSummary {
   alerts_danger: number;
   alerts_warning: number;
   alerts_resolved: number;
+  novedades_count: number;
+}
+
+export interface NovedadItem {
+  id: number;
+  municipio_cod: string;
+  zona_cod: string;
+  puesto_cod: string;
+  mesa: number;
+  corporacion: string;
+  validated_by: string;
+  action: string;
+  corrected_ph_votes: number | null;
+  novelty_note: string;
+  validated_at: string;
+  ai_ph_votes: number | null;
+  votos_urna: number | null;
+  ocr_confidence: number | null;
+  municipio: string | null;
+  puesto_nombre: string | null;
+  departamento: string | null;
 }
 
 export interface MesaData {
@@ -24,6 +45,7 @@ export interface MesaData {
   alert_type: string | null;
   severity: Severity | null;
   discrepancy_pct: number | null;
+  has_novelty: 0 | 1;
 }
 
 export interface PuestoNode {
@@ -80,6 +102,7 @@ export interface MapItem {
   lon: number;
   danger_count: number;
   warning_count: number;
+  novelty_count: number;
 }
 
 export interface ValidationResult {

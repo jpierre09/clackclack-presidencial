@@ -65,7 +65,7 @@ CLAUDE_DPI = 150
 CLAUDE_MAX_PAGES_SEN = 1       # Only page 5 (PACTO page) — set via page offset below
 CLAUDE_MAX_PAGES_CAM = 3
 CLAUDE_SEN_PACTO_PAGE = env_int("CLAUDE_SEN_PACTO_PAGE", 5)   # 1-indexed PDF page with Pacto SEN
-CLAUDE_CAM_PACTO_PAGE = env_int("CLAUDE_CAM_PACTO_PAGE", 0)   # 0 = unknown, read all 3 pages
+CLAUDE_CAM_PACTO_PAGE = env_int("CLAUDE_CAM_PACTO_PAGE", 1)   # 1-indexed PDF page with Pacto CAM
 
 # SFTP credentials (set to enable SFTP download; if unset, poller waits)
 SFTP_HOST     = os.getenv("SFTP_HOST", "")
@@ -77,12 +77,16 @@ SFTP_PATH     = os.getenv("SFTP_PATH", "/e14")       # Remote directory with PDF
 
 SFTP_READY = bool(SFTP_HOST and SFTP_USER and (SFTP_PASS or SFTP_KEY_PATH))
 
-# Polling interval (seconds)
+# Polling intervals (seconds)
 POLL_INTERVAL = 60
 LOCAL_SCAN_INTERVAL = 30
+SFTP_POLL_INTERVAL = env_int("SFTP_POLL_INTERVAL", 120)  # SFTP check every 2 min by default
 ENABLE_LOCAL_INGEST = env_flag("CLACK_ENABLE_LOCAL_INGEST", True)
 ENABLE_REMOTE_POLLER = env_flag("CLACK_ENABLE_REMOTE_POLLER", False)
 SERVE_FRONTEND = env_flag("CLACK_SERVE_FRONTEND", False)
+
+# Manual validation tool
+VALIDATE_SETUP_TOKEN = os.getenv("VALIDATE_SETUP_TOKEN", "")  # required to create users
 
 # Server
 HOST = os.getenv("CLACK_HOST", "0.0.0.0")
