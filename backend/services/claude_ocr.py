@@ -26,15 +26,23 @@ CLAUDE_API_URL = "https://api.anthropic.com/v1/messages"
 _BASE = Path(__file__).parent.parent.parent  # project root
 
 def _load_api_keys() -> list[str]:
-    """Lee ClaudeApiKeys.txt — una clave por línea. Ignora líneas vacías y comentarios."""
-    keys_file = _BASE / "ClaudeApiKeys.txt"
-    if not keys_file.exists():
-        # Compatibilidad: si existe clave única en variable de entorno
-        if ANTHROPIC_API_KEY:
-            return [ANTHROPIC_API_KEY]
-        return []
-    lines = keys_file.read_text(encoding="utf-8").splitlines()
-    return [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+    """Lee ClaudeApiKeys.txt — una clave por línea. Ignora líneas vacías y comentarios.
+
+    Busca en orden:
+    1. /persist/ClaudeApiKeys.txt (volumen persistente Railway)
+    2. {project_root}/ClaudeApiKeys.txt (dev local)
+    3. Variable de entorno ANTHROPIC_API_KEY (fallback)
+    """
+    from backend.config import _persist as _persist_dir
+    for candidate in (_persist_dir / "ClaudeApiKeys.txt", _BASE / "ClaudeApiKeys.txt"):
+        if candidate.exists():
+            lines = candidate.read_text(encoding="utf-8").splitlines()
+            keys = [l.strip() for l in lines if l.strip() and not l.strip().startswith("#")]
+            if keys:
+                return keys
+    if ANTHROPIC_API_KEY:
+        return [ANTHROPIC_API_KEY]
+    return []
 
 
 def _load_key_state() -> dict:
