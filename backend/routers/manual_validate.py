@@ -13,13 +13,21 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend import database as db
-from backend.config import BASE_DIR, VALIDATE_SETUP_TOKEN
+from backend.config import BASE_DIR, E14_DOWNLOADS_DIR, VALIDATE_SETUP_TOKEN
 from backend.services import alert_engine
 from backend.services.event_bus import event_bus
 
 router = APIRouter(prefix="/api/validar", tags=["manual-validate"])
 
 _ITERATIONS = 260_000
+
+
+def _safe_within(path, root) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _hash_password(password: str) -> str:
@@ -67,6 +75,20 @@ class SubmitRequest(BaseModel):
     corrected_ph_votes: int | None = None
 
 
+class AdminCropRequest(BaseModel):
+    municipio_cod: str
+    zona_cod: str
+    puesto_cod: str
+    mesa: int
+    corporacion: str
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    corrected_ph_votes: int | None = None
+    admin_token: str
+
+
 class NoveltyRequest(BaseModel):
     municipio_cod: str
     zona_cod: str
@@ -107,6 +129,39 @@ async def me(username: str = Depends(_require_auth)):
 
 # ── Admin ─────────────────────────────────────────────────────────────────────
 
+@router.post("/admin/crop-override")
+async def admin_crop_override(req: AdminCropRequest):
+    """Set a manual crop override for a PDF (admin only)."""
+    if not VALIDATE_SETUP_TOKEN:
+        raise HTTPException(status_code=503, detail="VALIDATE_SETUP_TOKEN not configured")
+    if not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    corp = req.corporacion.upper()
+    await db.save_crop_override(
+        req.municipio_cod, req.zona_cod, req.puesto_cod,
+        req.mesa, corp, "admin",
+        req.x0, req.y0, req.x1, req.y1,
+    )
+
+    if req.corrected_ph_votes is not None:
+        await db.submit_validation({
+            "municipio_cod": req.municipio_cod,
+            "zona_cod": req.zona_cod,
+            "puesto_cod": req.puesto_cod,
+            "mesa": req.mesa,
+            "corporacion": corp,
+            "validated_by": "admin",
+            "action": "corrected",
+            "corrected_ph_votes": req.corrected_ph_votes,
+        })
+        await alert_engine.evaluate_mesa(
+            req.municipio_cod, req.zona_cod, req.puesto_cod, req.mesa
+        )
+
+    return {"status": "ok"}
+
+
 @router.post("/admin/create-user")
 async def create_user(req: CreateUserRequest):
     if not VALIDATE_SETUP_TOKEN:
@@ -137,10 +192,7 @@ async def get_stats(username: str = Depends(_require_auth)):
 
 # ── Screenshot ────────────────────────────────────────────────────────────────
 
-@router.get("/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}")
-async def get_screenshot(
-    mun: str, zona: str, puesto: str, mesa: int, corp: str,
-):
+async def _resolve_pdf_path(mun: str, zona: str, puesto: str, mesa: int, corp: str):
     conn = await db.get_db()
     rows = await conn.execute_fetchall(
         """SELECT d.filepath FROM e14_results r
@@ -151,15 +203,40 @@ async def get_screenshot(
     )
     if not rows:
         raise HTTPException(status_code=404, detail="Result not found")
-    full_path = (BASE_DIR / rows[0]["filepath"]).resolve()
-    try:
-        full_path.relative_to(BASE_DIR.resolve())
-    except ValueError:
+    raw = rows[0]["filepath"]
+    # Support both absolute paths (Railway /persist/...) and legacy relative paths
+    from pathlib import Path as _Path
+    import os as _os
+    if _os.path.isabs(raw):
+        full_path = _Path(raw).resolve()
+    else:
+        full_path = (BASE_DIR / raw).resolve()
+    # Security: must be inside E14_DOWNLOADS_DIR or BASE_DIR
+    allowed = [E14_DOWNLOADS_DIR.resolve(), BASE_DIR.resolve()]
+    if not any(_safe_within(full_path, root) for root in allowed):
         raise HTTPException(status_code=400, detail="Invalid path")
     if not full_path.exists():
         raise HTTPException(status_code=404, detail="PDF file not found")
+    return full_path
+
+
+@router.get("/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}")
+async def get_screenshot(mun: str, zona: str, puesto: str, mesa: int, corp: str):
     from backend.services.screenshot import render_pacto_crop
-    return Response(content=render_pacto_crop(str(full_path), corp), media_type="image/png")
+    full_path = await _resolve_pdf_path(mun, zona, puesto, mesa, corp)
+    override = await db.get_crop_override(mun, zona, puesto, mesa, corp.upper())
+    return Response(
+        content=render_pacto_crop(str(full_path), corp, override=override),
+        media_type="image/png",
+    )
+
+
+@router.get("/fullpage/{mun}/{zona}/{puesto}/{mesa}/{corp}")
+async def get_fullpage(mun: str, zona: str, puesto: str, mesa: int, corp: str):
+    """Return the full PDF page image for the crop editor."""
+    from backend.services.screenshot import render_full_page
+    full_path = await _resolve_pdf_path(mun, zona, puesto, mesa, corp)
+    return Response(content=render_full_page(str(full_path), corp), media_type="image/png")
 
 
 # ── Submit single validation ──────────────────────────────────────────────────
@@ -204,6 +281,48 @@ async def report_novelty(req: NoveltyRequest, username: str = Depends(_require_a
         "severity": "info",
     })
     return {"status": "ok"}
+
+
+@router.get("/admin/validations")
+async def list_validations(search: str = "", admin_token: str = ""):
+    """List all validations for admin review (requires admin token)."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    return await db.get_all_validations(search)
+
+
+class AdminCorrectRequest(BaseModel):
+    validation_id: int
+    corrected_ph_votes: int
+    admin_token: str
+
+
+@router.post("/admin/correct-validation")
+async def admin_correct_validation(req: AdminCorrectRequest):
+    """Admin override of a validator's submitted value."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    ok = await db.admin_correct_validation(req.validation_id, req.corrected_ph_votes, "admin")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Validación no encontrada")
+    # Look up the mesa to re-evaluate discrepancy
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        "SELECT municipio_cod, zona_cod, puesto_cod, mesa FROM manual_validations WHERE id = ?",
+        (req.validation_id,),
+    )
+    if rows:
+        r = rows[0]
+        await alert_engine.evaluate_mesa(r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"])
+    return {"status": "ok", "validation_id": req.validation_id, "new_value": req.corrected_ph_votes}
+
+
+@router.post("/undo")
+async def undo_validation(username: str = Depends(_require_auth)):
+    """Undo the validator's most recent submission and return that item."""
+    item = await db.undo_last_validation(username)
+    stats = await db.get_validation_stats()
+    return {"item": item, "stats": stats}
 
 
 @router.get("/novedades")

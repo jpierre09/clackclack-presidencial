@@ -41,12 +41,24 @@ async def correct_result(mun: str, zona: str, puesto: str, mesa: int,
 @router.get("/pdf/{filepath:path}")
 async def serve_pdf(filepath: str):
     """Serve E-14 PDF file."""
-    from backend.config import BASE_DIR
-    full_path = (BASE_DIR / filepath).resolve()
-    try:
-        full_path.relative_to(BASE_DIR.resolve())
-    except ValueError:
+    import os
+    from pathlib import Path
+    from backend.config import BASE_DIR, E14_DOWNLOADS_DIR
+    if os.path.isabs(filepath):
+        full_path = Path(filepath).resolve()
+    else:
+        full_path = (BASE_DIR / filepath).resolve()
+    allowed = [BASE_DIR.resolve(), E14_DOWNLOADS_DIR.resolve()]
+    if not any(_within(full_path, r) for r in allowed):
         return {"error": "Invalid path"}
     if not full_path.exists():
         return {"error": "File not found"}
     return FileResponse(str(full_path), media_type="application/pdf")
+
+
+def _within(path: "Path", root: "Path") -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False

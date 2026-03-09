@@ -1542,6 +1542,11 @@ select {
   width: 100%;
   max-width: 440px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.tinder-modal--wide {
+  max-width: 640px;
 }
 
 .tinder-modal-title {
@@ -1580,6 +1585,86 @@ select {
 .tinder-modal-actions .tinder-btn {
   flex: none;
 }
+
+/* ── Crop editor ──────────────────────────────────────────────────────────── */
+.crop-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+  margin-bottom: 0.75rem;
+  user-select: none;
+}
+.crop-toggle input { cursor: pointer; accent-color: var(--ph-orange); }
+.crop-toggle span { color: var(--text); }
+
+.crop-editor {
+  margin-top: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+.crop-loading {
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 1rem 0;
+}
+.crop-hint {
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin: 0 0 0.4rem;
+}
+.crop-img-wrap {
+  position: relative;
+  max-height: 45vh;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  cursor: crosshair;
+  line-height: 0;
+}
+.crop-full-page {
+  width: 100%;
+  display: block;
+  user-select: none;
+}
+.crop-sel-rect {
+  position: absolute;
+  border: 2px dashed #f97316;
+  background: rgba(249, 115, 22, 0.12);
+  pointer-events: none;
+}
+.crop-preview-section {
+  margin-top: 0.75rem;
+}
+.crop-preview-box {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  max-width: 100%;
+  background: #111;
+}
+.crop-votes-label {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+.crop-votes-input {
+  width: 90px;
+  background: #1e1e1e;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  color: var(--text);
+  padding: 0.35rem 0.5rem;
+  font-size: 0.92rem;
+  font-family: inherit;
+}
+.crop-votes-input:focus { outline: none; border-color: var(--ph-orange); }
 
 /* Nav badge (novedades count) */
 .nav-btn { position: relative; }
@@ -1815,3 +1900,107 @@ select {
 }
 
 .novedad-dept { margin-left: auto; }
+
+.novedad-crop-btn {
+  margin-left: auto;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.novedad-crop-btn:hover { color: var(--ph-orange); border-color: var(--ph-orange); }
+
+/* Novedades tabs */
+.novedades-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.4rem;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 0;
+}
+
+.novedades-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+  padding: 0.55rem 1rem;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.novedades-tab:hover { color: var(--text); }
+.novedades-tab.active { color: var(--ph-orange); border-bottom-color: var(--ph-orange); }
+
+/* Admin corrections table */
+.correcciones-panel { width: 100%; }
+
+.correcciones-search-row {
+  display: flex;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.correcciones-search-input {
+  flex: 1;
+  min-width: 180px;
+  background: #141414;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  color: var(--text);
+  font-size: 0.85rem;
+  padding: 0.45rem 0.75rem;
+}
+.correcciones-search-input:focus { outline: none; border-color: var(--ph-orange); }
+
+.correcciones-table-wrap { overflow-x: auto; }
+
+.correcciones-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.correcciones-table th {
+  background: #141414;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-weight: 600;
+  padding: 0.45rem 0.7rem;
+  text-align: left;
+  white-space: nowrap;
+}
+.correcciones-table td {
+  border-bottom: 1px solid #1e1e1e;
+  padding: 0.4rem 0.7rem;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+.correcciones-table tr.row-corrected td { color: var(--ph-orange); }
+.correcciones-table tbody tr:hover td { background: #141414; }
+
+/* Undo button */
+.tinder-undo-btn {
+  margin-top: 0.8rem;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.4rem 0.9rem;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tinder-undo-btn:hover { color: var(--text); border-color: var(--text); }
+
+.tinder-undo-btn--inline {
+  margin-top: 0;
+  font-size: 1rem;
+  padding: 0.55rem 0.75rem;
+}

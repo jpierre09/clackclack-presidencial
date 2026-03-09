@@ -19,16 +19,56 @@ def _find_pacto_rect(doc: fitz.Document) -> tuple[int, fitz.Rect] | None:
     for i, page in enumerate(doc):
         hits = page.search_for("PACTO")
         if hits:
-            # Use the first hit (topmost match on the page)
             r = hits[0]
             return i, r
     return None
 
 
-def render_pacto_crop(filepath: str, corporacion: str) -> bytes:
-    """Return PNG bytes of the Pacto vote table area from the relevant PDF page."""
+def _pacto_page_idx(doc: fitz.Document, corp: str) -> int:
+    """Return the page index where the Pacto section is (or should be)."""
+    found = _find_pacto_rect(doc)
+    if found:
+        return found[0]
+    if corp.upper() in ("SEN", "SENADO"):
+        return min(max(0, CLAUDE_SEN_PACTO_PAGE - 1), len(doc) - 1)
+    return min(max(0, (CLAUDE_CAM_PACTO_PAGE or 1) - 1), len(doc) - 1)
+
+
+def render_full_page(filepath: str, corporacion: str) -> bytes:
+    """Return PNG of the full page where the Pacto section appears (for crop editor)."""
+    doc = fitz.open(filepath)
+    page_idx = _pacto_page_idx(doc, corporacion)
+    page = doc[page_idx]
+    mat = fitz.Matrix(1.5, 1.5)
+    pix = page.get_pixmap(matrix=mat)
+    return pix.tobytes("png")
+
+
+def render_pacto_crop(filepath: str, corporacion: str,
+                      override: tuple[float, float, float, float] | None = None) -> bytes:
+    """Return PNG bytes of the Pacto vote table area from the relevant PDF page.
+
+    override: (x0_pct, y0_pct, x1_pct, y1_pct) as 0–1 fractions of page size.
+              When provided, skips auto-detection and uses these coordinates.
+    """
     doc = fitz.open(filepath)
     corp = corporacion.upper()
+
+    # ── Manual crop override ───────────────────────────────────────────────────
+    if override:
+        x0p, y0p, x1p, y1p = override
+        page_idx = _pacto_page_idx(doc, corp)
+        page = doc[page_idx]
+        r = page.rect
+        crop = fitz.Rect(
+            r.x0 + r.width  * x0p,
+            r.y0 + r.height * y0p,
+            r.x0 + r.width  * x1p,
+            r.y0 + r.height * y1p,
+        )
+        mat = fitz.Matrix(2.0, 2.0)
+        pix = page.get_pixmap(matrix=mat, clip=crop)
+        return pix.tobytes("png")
 
     # ── Try text search first ──────────────────────────────────────────────────
     found = _find_pacto_rect(doc)
@@ -48,11 +88,9 @@ def render_pacto_crop(filepath: str, corporacion: str) -> bytes:
 
     # ── Fallback: calibrated page + percentage crop ────────────────────────────
     if corp in ("SEN", "SENADO"):
-        # SEN: Pacto appears at ~21%-36% of page height (page 5)
         page_idx = max(0, CLAUDE_SEN_PACTO_PAGE - 1)
         y_top, y_bot = 0.214, 0.362
     else:
-        # CAM: Pacto appears at ~32%-45% of page height (page 1)
         page_idx = max(0, (CLAUDE_CAM_PACTO_PAGE or 1) - 1)
         y_top, y_bot = 0.322, 0.445
 

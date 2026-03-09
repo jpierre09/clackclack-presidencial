@@ -134,6 +134,26 @@ export async function getNovedades(): Promise<NovedadItem[]> {
   return fetchJson<NovedadItem[]>("/api/validar/novedades");
 }
 
+export async function getAdminValidations(adminToken: string, search = ""): Promise<NovedadItem[]> {
+  const params = new URLSearchParams({ admin_token: adminToken });
+  if (search) params.set("search", search);
+  return fetchJson<NovedadItem[]>(`/api/validar/admin/validations?${params}`);
+}
+
+export async function adminCorrectValidation(
+  adminToken: string, validationId: number, correctedVotes: number
+): Promise<void> {
+  const res = await fetch(withBase("/api/validar/admin/correct-validation"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ admin_token: adminToken, validation_id: validationId, corrected_ph_votes: correctedVotes }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `${res.status}`);
+  }
+}
+
 export async function downloadNovedadesExport(): Promise<void> {
   const response = await fetch(withBase("/api/validar/novedades/export"));
   if (!response.ok) throw new Error(`${response.status}`);

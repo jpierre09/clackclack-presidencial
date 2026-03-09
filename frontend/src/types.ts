@@ -34,6 +34,10 @@ export interface NovedadItem {
   departamento: string | null;
 }
 
+export interface ValidationItem extends NovedadItem {
+  // Same structure, reused for admin corrections list
+}
+
 export interface MesaData {
   mesa: number;
   sen_votes: number | null;

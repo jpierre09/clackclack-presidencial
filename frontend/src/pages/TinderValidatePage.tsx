@@ -43,6 +43,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
 
   const [noveltyOpen, setNoveltyOpen] = useState(false);
   const [noveltyText, setNoveltyText] = useState("");
+  const [canUndo, setCanUndo] = useState(false);
 
   const [imgKey, setImgKey] = useState(0);
   const editRef = useRef<HTMLInputElement>(null);
@@ -68,6 +69,24 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
     }
   }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  async function undoLast() {
+    setLoading(true);
+    setSwipe(null);
+    setEditMode(false);
+    setEditValue("");
+    try {
+      const res = await fetch("/api/validar/undo", { method: "POST", headers });
+      if (res.status === 401) { onLogout(); return; }
+      const data = await res.json();
+      setItem(data.item);
+      setStats(data.stats);
+      setCanUndo(false);
+      setImgKey((k) => k + 1);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => { void fetchNext(); }, [fetchNext]);
 
   // Auto-poll every 6s when queue is empty (new PDFs may arrive at any time)
@@ -88,6 +107,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
       if (e.key === "Escape") {
         setEditMode(false);
         setNoveltyOpen(false);
+        setNoveltyText("");
         return;
       }
       if (noveltyOpen) {
@@ -134,6 +154,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
         action: "approved",
       }),
     });
+    setCanUndo(true);
     setTimeout(fetchNext, 350);
   }
 
@@ -156,6 +177,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
         corrected_ph_votes: val,
       }),
     });
+    setCanUndo(true);
     setTimeout(fetchNext, 350);
   }
 
@@ -206,6 +228,11 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
               </p>
             )}
             <p className="tinder-hint">Verificando automáticamente cada 6 segundos</p>
+            {canUndo && (
+              <button className="tinder-undo-btn" onClick={undoLast}>
+                ↩ Deshacer última validación
+              </button>
+            )}
           </div>
         )}
 
@@ -275,6 +302,11 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
 
             {!editMode && (
               <div className="tinder-actions">
+                {canUndo && (
+                  <button className="tinder-undo-btn tinder-undo-btn--inline" onClick={undoLast} title="Deshacer">
+                    ↩
+                  </button>
+                )}
                 <button className="tinder-btn reject" onClick={openEdit} title="← Corregir">
                   ← Corregir
                 </button>
@@ -297,7 +329,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
       </main>
 
       {noveltyOpen && (
-        <div className="tinder-modal-overlay" onClick={() => setNoveltyOpen(false)}>
+        <div className="tinder-modal-overlay" onClick={() => { setNoveltyOpen(false); setNoveltyText(""); }}>
           <div className="tinder-modal" onClick={(e) => e.stopPropagation()}>
             <h2 className="tinder-modal-title">Reporte de Novedad</h2>
             {item && (
@@ -314,7 +346,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
               rows={5}
             />
             <div className="tinder-modal-actions">
-              <button className="tinder-btn" onClick={() => setNoveltyOpen(false)}>Cancelar</button>
+              <button className="tinder-btn" onClick={() => { setNoveltyOpen(false); setNoveltyText(""); }}>Cancelar</button>
               <button
                 className="tinder-btn approve"
                 onClick={submitNovelty}

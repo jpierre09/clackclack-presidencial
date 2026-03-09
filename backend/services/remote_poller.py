@@ -165,10 +165,14 @@ query DepartmentsTree($first: Int = 500000) {
 """
 
 _QUERY_TRANSMISSION_CODES = """
-query AllTransmissionCodes($first: Int = 100000, $status: Int!) {
+query AllTransmissionCodes($first: Int!, $status: Int!, $dept: String!, $corp: String!) {
   allTransmissionCodes(
     first: $first
-    condition: { idTransmissionCodeStatus: $status }
+    condition: {
+      idTransmissionCodeStatus: $status
+      idDepartmentCode: $dept
+      idCorporationCode: $corp
+    }
   ) {
     nodes {
       idDepartmentCode
@@ -183,6 +187,7 @@ query AllTransmissionCodes($first: Int = 100000, $status: Int!) {
   }
 }
 """
+_PAGE_SIZE = 20000
 
 
 class RemotePoller:
@@ -320,23 +325,24 @@ class RemotePoller:
                     log.warning("Catalogs not available yet")
                     return stats
 
-            # Fetch published transmission codes (status 3 and 11, separate queries to stay under 6MB limit)
+            # Fetch per dept+corp+status combination (4 small queries instead of 2 huge ones)
+            dept = DEPT_CODE if DEPT_CODE not in ("ALL", "") else "01"
             nodes: list[dict] = []
-            for status in (3, 11):
-                data = await self._gql(
-                    client, _QUERY_TRANSMISSION_CODES, {"first": 100000, "status": status}
-                )
-                if data:
-                    nodes.extend(data.get("allTransmissionCodes", {}).get("nodes") or [])
-                else:
-                    log.warning("allTransmissionCodes status=%s not available", status)
+            for corp_code in ("001", "002"):  # SEN, CAM
+                for status in (3, 11):
+                    vars_ = {"first": _PAGE_SIZE, "status": status, "dept": dept, "corp": corp_code}
+                    data = await self._gql(client, _QUERY_TRANSMISSION_CODES, vars_)
+                    if not data:
+                        log.warning("allTransmissionCodes dept=%s corp=%s status=%s failed", dept, corp_code, status)
+                        continue
+                    batch = data.get("allTransmissionCodes", {}).get("nodes") or []
+                    nodes.extend(batch)
+                    log.info("dept=%s corp=%s status=%s → %s records", dept, corp_code, status, len(batch))
 
-            # Filter: target dept + published (status 3 or 11) + SEN and CAM only
+            # Filter: published (status 3 or 11) + SEN and CAM only (dept already filtered in query)
             filtered = []
             for row in nodes:
                 dep = str(row.get("idDepartmentCode") or "")
-                if DEPT_CODE not in ("ALL", "") and dep != DEPT_CODE:
-                    continue
                 status = row.get("idTransmissionCodeStatus")
                 if status not in (3, 11):
                     continue

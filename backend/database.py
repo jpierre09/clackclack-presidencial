@@ -184,6 +184,22 @@ CREATE INDEX IF NOT EXISTS idx_alerts_unresolved ON alerts(is_resolved) WHERE is
 CREATE INDEX IF NOT EXISTS idx_e14_downloads_location ON e14_downloads(municipio_cod, zona_cod, puesto_cod);
 CREATE INDEX IF NOT EXISTS idx_party_votes_corp ON party_votes(corporacion);
 CREATE INDEX IF NOT EXISTS idx_party_votes_location ON party_votes(municipio_cod, zona_cod, puesto_cod, mesa);
+
+CREATE TABLE IF NOT EXISTS crop_overrides (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    municipio_cod TEXT NOT NULL,
+    zona_cod TEXT NOT NULL,
+    puesto_cod TEXT NOT NULL,
+    mesa INTEGER NOT NULL,
+    corporacion TEXT NOT NULL,
+    x0_pct REAL NOT NULL,
+    y0_pct REAL NOT NULL,
+    x1_pct REAL NOT NULL,
+    y1_pct REAL NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+);
 """
 
 
@@ -1350,6 +1366,59 @@ async def submit_validation(data: dict):
     await db.commit()
 
 
+async def undo_last_validation(username: str) -> dict | None:
+    """Delete the most recent (non-novelty) validation by this user and re-claim it."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """
+        SELECT mv.id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod,
+               mv.mesa, mv.corporacion,
+               r.ph_total_votos, r.ph_votos_lista, r.votos_urna,
+               r.ocr_confidence, r.processed_at, d.filepath,
+               p.municipio, p.nombre as puesto_nombre
+        FROM manual_validations mv
+        JOIN e14_results r
+            ON r.municipio_cod = mv.municipio_cod
+            AND r.zona_cod = mv.zona_cod
+            AND r.puesto_cod = mv.puesto_cod
+            AND r.mesa = mv.mesa
+            AND r.corporacion = mv.corporacion
+        JOIN e14_downloads d ON d.id = r.download_id
+        LEFT JOIN puestos p ON p.municipio_cod = mv.municipio_cod
+            AND p.zona_cod = mv.zona_cod AND p.puesto_cod = mv.puesto_cod
+        WHERE mv.validated_by = ?
+          AND (mv.novelty_note IS NULL OR mv.novelty_note = '')
+        ORDER BY mv.validated_at DESC
+        LIMIT 1
+        """,
+        (username,),
+    )
+    if not rows:
+        return None
+
+    r = dict(rows[0])
+    val_id = r.pop("id")
+    mun, zona, puesto, mesa, corp = (
+        r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
+    )
+
+    await db.execute("DELETE FROM manual_validations WHERE id = ?", (val_id,))
+    # Release any current claim, then re-claim the undone item
+    await db.execute("DELETE FROM queue_claims WHERE claimed_by = ?", (username,))
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO queue_claims
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion, claimed_by, claimed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (mun, zona, puesto, mesa, corp, username, datetime.now().isoformat()),
+    )
+    await db.commit()
+
+    r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
+    return r
+
+
 async def get_novelty_reports() -> list[dict]:
     """Return all manual validations that have a novelty note, with full mesa info."""
     db = await get_db()
@@ -1383,6 +1452,76 @@ async def get_novelty_reports() -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_all_validations(search: str = "") -> list[dict]:
+    """Return all manual validations for admin review, with full mesa info."""
+    db = await get_db()
+    query = """
+        SELECT
+            mv.id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod, mv.mesa,
+            mv.corporacion, mv.validated_by, mv.action,
+            mv.corrected_ph_votes, mv.novelty_note, mv.validated_at,
+            r.ph_total_votos as ai_ph_votes,
+            r.votos_urna, r.ocr_confidence,
+            p.municipio, p.nombre as puesto_nombre, p.departamento
+        FROM manual_validations mv
+        JOIN e14_results r
+            ON r.municipio_cod = mv.municipio_cod AND r.zona_cod = mv.zona_cod
+            AND r.puesto_cod = mv.puesto_cod AND r.mesa = mv.mesa
+            AND r.corporacion = mv.corporacion
+        LEFT JOIN puestos p
+            ON p.municipio_cod = mv.municipio_cod AND p.zona_cod = mv.zona_cod
+            AND p.puesto_cod = mv.puesto_cod
+    """
+    params: list = []
+    if search:
+        query += """
+        WHERE mv.id = CAST(? AS INTEGER)
+           OR mv.validated_by LIKE ?
+           OR p.municipio LIKE ?
+           OR p.nombre LIKE ?
+        """
+        like = f"%{search}%"
+        params = [search, like, like, like]
+    query += " ORDER BY mv.validated_at DESC LIMIT 200"
+    rows = await db.execute_fetchall(query, params)
+    return [dict(r) for r in rows]
+
+
+async def admin_correct_validation(validation_id: int, new_votes: int, admin_user: str):
+    """Overwrite a manual validation's corrected_ph_votes and update e14_results."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT * FROM manual_validations WHERE id = ?", (validation_id,)
+    )
+    if not rows:
+        return False
+    mv = rows[0]
+    now = datetime.now().isoformat()
+    await db.execute(
+        """UPDATE manual_validations SET
+               action = 'corrected',
+               corrected_ph_votes = ?,
+               validated_by = ?,
+               validated_at = ?
+           WHERE id = ?""",
+        (new_votes, admin_user, now, validation_id),
+    )
+    await db.execute(
+        """UPDATE e14_results SET
+               ph_total_votos = ?,
+               status = 'corrected',
+               corrected_by = ?,
+               corrected_at = ?
+           WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+             AND mesa = ? AND corporacion = ?""",
+        (new_votes, admin_user, now,
+         mv["municipio_cod"], mv["zona_cod"], mv["puesto_cod"],
+         mv["mesa"], mv["corporacion"]),
+    )
+    await db.commit()
+    return True
+
+
 async def add_novelty_note(mun: str, zona: str, puesto: str, mesa: int,
                             corp: str, username: str, note: str):
     """Add/update novelty note on an existing validation, or create one if absent."""
@@ -1413,3 +1552,41 @@ async def add_novelty_note(mun: str, zona: str, puesto: str, mesa: int,
         "description": f"Novedad ({corp}) reportada por {username}: {note[:200]}",
         "created_at": datetime.now().isoformat(),
     })
+
+
+async def save_crop_override(mun: str, zona: str, puesto: str, mesa: int,
+                              corp: str, username: str,
+                              x0: float, y0: float, x1: float, y1: float):
+    """Save a manual crop override for a specific mesa/corp PDF."""
+    db = await get_db()
+    await db.execute(
+        """
+        INSERT INTO crop_overrides
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             x0_pct, y0_pct, x1_pct, y1_pct, created_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+        DO UPDATE SET
+            x0_pct = excluded.x0_pct, y0_pct = excluded.y0_pct,
+            x1_pct = excluded.x1_pct, y1_pct = excluded.y1_pct,
+            created_by = excluded.created_by, created_at = excluded.created_at
+        """,
+        (mun, zona, puesto, mesa, corp, x0, y0, x1, y1, username, datetime.now().isoformat()),
+    )
+    await db.commit()
+
+
+async def get_crop_override(mun: str, zona: str, puesto: str, mesa: int,
+                             corp: str) -> tuple[float, float, float, float] | None:
+    """Return (x0, y0, x1, y1) fractions if a manual crop override exists, else None."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """SELECT x0_pct, y0_pct, x1_pct, y1_pct FROM crop_overrides
+           WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+             AND mesa=? AND corporacion=? LIMIT 1""",
+        (mun, zona, puesto, mesa, corp),
+    )
+    if rows:
+        r = rows[0]
+        return (r["x0_pct"], r["y0_pct"], r["x1_pct"], r["y1_pct"])
+    return None

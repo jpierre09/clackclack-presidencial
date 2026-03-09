@@ -67,7 +67,7 @@ def parse_e14_metadata(pdf_path: Path) -> dict | None:
         "mesa": mesa,
         "corporacion": corporacion,
         "filename": filename,
-        "filepath": str(pdf_path.resolve().relative_to(Path(__file__).resolve().parent.parent.parent)).replace("\\", "/"),
+        "filepath": str(pdf_path.resolve()).replace("\\", "/"),
         "downloaded_at": datetime.now().isoformat(),
         "file_size": pdf_path.stat().st_size,
         "full_path": str(pdf_path.resolve()),
