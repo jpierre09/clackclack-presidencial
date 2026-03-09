@@ -414,7 +414,7 @@ async def scan_novedades_not_digitized():
 
 
 @router.get("/not-digitized-list")
-async def not_digitized_list(corp: str = "SEN", limit: int = 48, offset: int = 0):
+async def not_digitized_list(corp: str = "SEN", limit: int = 100, offset: int = 0):
     """Paginated list of not_digitized records with screenshot URL."""
     from backend import database as db
     conn = await db.get_db()
