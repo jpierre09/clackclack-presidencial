@@ -1914,6 +1914,44 @@ select {
 }
 .novedad-crop-btn:hover { color: var(--ph-orange); border-color: var(--ph-orange); }
 
+.novedad-resolve-btn {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 0.35rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.novedad-resolve-btn:hover { color: #22c55e; border-color: #22c55e; }
+.novedad-resolve-btn.resolved { color: #22c55e; border-color: #22c55e; }
+.novedad-resolve-btn.resolved:hover { color: var(--muted); border-color: var(--line); }
+.novedad-resolve-btn:disabled { opacity: 0.5; cursor: default; }
+
+.novedad-resolved-label {
+  font-size: 0.72rem;
+  color: #22c55e;
+  margin-left: auto;
+}
+
+.novedad-card.resolved-novelty {
+  opacity: 0.55;
+  border-left-color: #22c55e;
+}
+.novedad-card.resolved-novelty:hover { opacity: 0.85; }
+
+.novedad-resolved-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.novedad-resolved-toggle input { cursor: pointer; accent-color: #22c55e; }
+
 /* Novedades tabs */
 .novedades-tabs {
   display: flex;

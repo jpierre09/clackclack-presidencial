@@ -356,6 +356,28 @@ async def get_novedades():
     return await db.get_novelty_reports()
 
 
+class ResolveNoveltyRequest(BaseModel):
+    admin_token: str
+
+
+@router.post("/novedades/{novelty_id}/resolve")
+async def resolve_novelty(novelty_id: int, req: ResolveNoveltyRequest):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    ok = await db.resolve_novelty(novelty_id, "admin")
+    if not ok:
+        raise HTTPException(status_code=404, detail="Novedad no encontrada")
+    return {"status": "ok"}
+
+
+@router.post("/novedades/{novelty_id}/unresolve")
+async def unresolve_novelty(novelty_id: int, req: ResolveNoveltyRequest):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    await db.unresolve_novelty(novelty_id)
+    return {"status": "ok"}
+
+
 @router.get("/novedades/export")
 async def export_novedades():
     """Download all novelty reports as Excel."""

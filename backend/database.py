@@ -31,7 +31,19 @@ async def close_db():
 async def init_db():
     db = await get_db()
     await db.executescript(SCHEMA)
+    # Migrations: add columns that may not exist in older DBs
+    for migration in _MIGRATIONS:
+        try:
+            await db.execute(migration)
+        except Exception:
+            pass  # Column already exists
     await db.commit()
+
+
+_MIGRATIONS = [
+    "ALTER TABLE manual_validations ADD COLUMN resolved_at TEXT",
+    "ALTER TABLE manual_validations ADD COLUMN resolved_by TEXT",
+]
 
 
 SCHEMA = """
@@ -1428,6 +1440,7 @@ async def get_novelty_reports() -> list[dict]:
             mv.id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod, mv.mesa,
             mv.corporacion, mv.validated_by, mv.action,
             mv.corrected_ph_votes, mv.novelty_note, mv.validated_at,
+            mv.resolved_at, mv.resolved_by,
             r.ph_total_votos as ai_ph_votes,
             r.votos_urna,
             r.ocr_confidence,
@@ -1446,10 +1459,35 @@ async def get_novelty_reports() -> list[dict]:
             AND p.zona_cod = mv.zona_cod
             AND p.puesto_cod = mv.puesto_cod
         WHERE mv.novelty_note IS NOT NULL AND mv.novelty_note != ''
-        ORDER BY mv.validated_at DESC
+        ORDER BY mv.resolved_at IS NOT NULL, mv.validated_at DESC
         """
     )
     return [dict(r) for r in rows]
+
+
+async def resolve_novelty(novelty_id: int, resolved_by: str) -> bool:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM manual_validations WHERE id = ?", (novelty_id,)
+    )
+    if not rows:
+        return False
+    await db.execute(
+        "UPDATE manual_validations SET resolved_at = ?, resolved_by = ? WHERE id = ?",
+        (datetime.now().isoformat(), resolved_by, novelty_id),
+    )
+    await db.commit()
+    return True
+
+
+async def unresolve_novelty(novelty_id: int) -> bool:
+    db = await get_db()
+    await db.execute(
+        "UPDATE manual_validations SET resolved_at = NULL, resolved_by = NULL WHERE id = ?",
+        (novelty_id,),
+    )
+    await db.commit()
+    return True
 
 
 async def get_all_validations(search: str = "") -> list[dict]:

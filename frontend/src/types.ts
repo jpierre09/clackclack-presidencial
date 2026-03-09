@@ -26,6 +26,8 @@ export interface NovedadItem {
   corrected_ph_votes: number | null;
   novelty_note: string;
   validated_at: string;
+  resolved_at: string | null;
+  resolved_by: string | null;
   ai_ph_votes: number | null;
   votos_urna: number | null;
   ocr_confidence: number | null;

@@ -131,6 +131,19 @@ export async function saveUserSettings(payload: UserSettings): Promise<void> {
   });
 }
 
+export async function resolveNovedad(adminToken: string, noveltyId: number, unresolve = false): Promise<void> {
+  const action = unresolve ? "unresolve" : "resolve";
+  const res = await fetch(withBase(`/api/validar/novedades/${noveltyId}/${action}`), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ admin_token: adminToken }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `${res.status}`);
+  }
+}
+
 export async function getProgress(): Promise<ProgressData> {
   return fetchJson<ProgressData>("/api/validar/progress");
 }

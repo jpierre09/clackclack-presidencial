@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as RMouseEvent } from "react";
-import { getNovedades, downloadNovedadesExport, getAdminValidations, adminCorrectValidation } from "../api";
+import { getNovedades, downloadNovedadesExport, getAdminValidations, adminCorrectValidation, resolveNovedad } from "../api";
 import type { NovedadItem } from "../types";
 
 interface Props {
@@ -23,6 +23,8 @@ export function NovedadesPage({ pendingCount }: Props) {
   const [tab, setTab] = useState<"novedades" | "correcciones">("novedades");
   const [items, setItems] = useState<NovedadItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showResolved, setShowResolved] = useState(false);
+  const [resolvingId, setResolvingId] = useState<number | null>(null);
 
   // Admin corrections tab
   const [valItems, setValItems] = useState<NovedadItem[]>([]);
@@ -79,6 +81,20 @@ export function NovedadesPage({ pendingCount }: Props) {
       setCorrectError(String(e));
     } finally {
       setCorrectSaving(false);
+    }
+  }
+
+  async function handleResolve(item: NovedadItem) {
+    if (!adminToken) { setPendingItem(null); setTokenPrompt(true); return; }
+    setResolvingId(item.id);
+    try {
+      await resolveNovedad(adminToken, item.id, item.resolved_at != null);
+      const updated = await getNovedades();
+      setItems(updated);
+    } catch {
+      // ignore
+    } finally {
+      setResolvingId(null);
     }
   }
 
@@ -191,17 +207,25 @@ export function NovedadesPage({ pendingCount }: Props) {
       {/* ── NOVEDADES TAB ── */}
       {tab === "novedades" && (<>
       <div className="novedades-title-row">
-        <h2 className="novedades-title">Novedades reportadas por validadores</h2>
+        <h2 className="novedades-title">
+          Novedades reportadas por validadores
+        </h2>
+        <label className="novedad-resolved-toggle">
+          <input type="checkbox" checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} />
+          Mostrar resueltas
+        </label>
         <button type="button" className="action-btn" onClick={() => void downloadNovedadesExport()}>
           Descargar (.xlsx)
         </button>
       </div>
       {loading && <p className="inline-note">Cargando novedades...</p>}
-      {!loading && items.length === 0 && <div className="novedades-empty"><p>No hay novedades reportadas.</p></div>}
+      {!loading && items.filter(i => showResolved || !i.resolved_at).length === 0 && (
+        <div className="novedades-empty"><p>No hay novedades {showResolved ? "" : "pendientes"}.</p></div>
+      )}
 
       <div className="novedades-list">
-        {items.map((item) => (
-          <div key={item.id} className={`novedad-card${item.action === "corrected" ? " corrected" : ""}`}>
+        {items.filter(i => showResolved || !i.resolved_at).map((item) => (
+          <div key={item.id} className={`novedad-card${item.action === "corrected" ? " corrected" : ""}${item.resolved_at ? " resolved-novelty" : ""}`}>
             <div className="novedad-header">
               <span className="novedad-corp">{item.corporacion}</span>
               <span className="novedad-location">
@@ -231,12 +255,25 @@ export function NovedadesPage({ pendingCount }: Props) {
             <div className="novedad-footer">
               <span className="novedad-by">Reportado por: {item.validated_by}</span>
               {item.departamento && <span className="novedad-dept">{item.departamento}</span>}
+              {item.resolved_at && (
+                <span className="novedad-resolved-label">
+                  ✓ Resuelta por {item.resolved_by} · {new Date(item.resolved_at).toLocaleString("es-CO")}
+                </span>
+              )}
               <button
                 className="novedad-crop-btn"
                 onClick={() => openCropEditor(item)}
                 title="Corregir el recorte de imagen para esta mesa"
               >
-                ✂ Corregir recorte
+                ✂ Recorte
+              </button>
+              <button
+                className={`novedad-resolve-btn${item.resolved_at ? " resolved" : ""}`}
+                disabled={resolvingId === item.id}
+                onClick={() => void handleResolve(item)}
+                title={item.resolved_at ? "Marcar como pendiente" : "Marcar como resuelta"}
+              >
+                {resolvingId === item.id ? "..." : item.resolved_at ? "↩ Reabrir" : "✓ Resolver"}
               </button>
             </div>
           </div>
