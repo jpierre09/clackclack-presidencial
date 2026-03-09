@@ -175,8 +175,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
     });
     setNoveltyOpen(false);
     setNoveltyText("");
-    const r = await fetch("/api/validar/queue/stats", { headers });
-    if (r.ok) setStats(await r.json());
+    void fetchNext();
   }
 
   const cardClass = `tinder-card${swipe === "right" ? " swipe-right" : swipe === "left" ? " swipe-left" : ""}`;
