@@ -413,6 +413,42 @@ async def scan_novedades_not_digitized():
     }
 
 
+@router.get("/not-digitized-list")
+async def not_digitized_list(corp: str = "SEN", limit: int = 48, offset: int = 0):
+    """Paginated list of not_digitized records with screenshot URL."""
+    from backend import database as db
+    conn = await db.get_db()
+    total_row = await conn.execute_fetchone(
+        "SELECT COUNT(*) as n FROM e14_results WHERE status='not_digitized' AND corporacion=?",
+        (corp.upper(),)
+    )
+    total = total_row["n"] if total_row else 0
+    rows = await conn.execute_fetchall(
+        """SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion,
+                  r.processed_at, r.error_message,
+                  m.nombre as municipio, p.nombre as puesto_nombre
+           FROM e14_results r
+           LEFT JOIN municipios m ON m.codigo = r.municipio_cod
+           LEFT JOIN puestos p ON (
+               p.municipio_cod = r.municipio_cod AND p.zona_cod = r.zona_cod
+               AND p.puesto_cod = r.puesto_cod
+           )
+           WHERE r.status = 'not_digitized' AND r.corporacion = ?
+           ORDER BY r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa
+           LIMIT ? OFFSET ?""",
+        (corp.upper(), limit, offset)
+    )
+    items = []
+    for row in rows:
+        d = dict(row)
+        d["screenshot_url"] = (
+            f"/api/validar/screenshot/{d['municipio_cod']}/{d['zona_cod']}"
+            f"/{d['puesto_cod']}/{d['mesa']}/{d['corporacion']}"
+        )
+        items.append(d)
+    return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
 @router.get("/not-digitized-count")
 async def not_digitized_count():
     """Count PDFs that Registraduría hasn't digitized yet."""
