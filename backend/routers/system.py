@@ -121,9 +121,19 @@ async def ocr_errors():
     return [dict(r) for r in rows]
 
 
+@router.post("/reset-key-state")
+async def reset_key_state():
+    """Clear the Claude API key exhaustion state so rotation resets."""
+    from backend.services.claude_ocr import _BASE
+    state_file = _BASE / "ClaudeKeyState.json"
+    if state_file.exists():
+        state_file.unlink()
+    return {"status": "ok", "message": "ClaudeKeyState.json eliminado — rotación de claves reseteada"}
+
+
 @router.post("/retry-errors")
 async def retry_errors(limit: int = 20):
-    """Reset error-status results to allow re-processing."""
+    """Delete error-status results so they can be re-processed on next rescan."""
     from backend import database as db
     conn = await db.get_db()
     await conn.execute(
