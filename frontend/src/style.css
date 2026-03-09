@@ -1952,6 +1952,35 @@ select {
 }
 .novedad-resolved-toggle input { cursor: pointer; accent-color: #22c55e; }
 
+/* Resolve novelty modal */
+.resolve-img-wrap {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+  background: #0d0d0d;
+  border-radius: 0.5rem;
+  overflow: hidden;
+  max-height: 320px;
+}
+.resolve-img {
+  max-width: 100%;
+  max-height: 320px;
+  object-fit: contain;
+  display: block;
+}
+.resolve-votes-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+.resolve-ai-ref {
+  font-size: 0.82rem;
+  color: var(--muted);
+  padding-bottom: 0.3rem;
+}
+
 /* Novedades tabs */
 .novedades-tabs {
   display: flex;

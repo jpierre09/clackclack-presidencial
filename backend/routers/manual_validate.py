@@ -358,15 +358,25 @@ async def get_novedades():
 
 class ResolveNoveltyRequest(BaseModel):
     admin_token: str
+    corrected_ph_votes: int | None = None
 
 
 @router.post("/novedades/{novelty_id}/resolve")
 async def resolve_novelty(novelty_id: int, req: ResolveNoveltyRequest):
     if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
         raise HTTPException(status_code=403, detail="Token inválido")
-    ok = await db.resolve_novelty(novelty_id, "admin")
+    ok = await db.resolve_novelty(novelty_id, "admin", req.corrected_ph_votes)
     if not ok:
         raise HTTPException(status_code=404, detail="Novedad no encontrada")
+    if req.corrected_ph_votes is not None:
+        conn = await db.get_db()
+        rows = await conn.execute_fetchall(
+            "SELECT municipio_cod, zona_cod, puesto_cod, mesa FROM manual_validations WHERE id=?",
+            (novelty_id,),
+        )
+        if rows:
+            r = rows[0]
+            await alert_engine.evaluate_mesa(r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"])
     return {"status": "ok"}
 
 

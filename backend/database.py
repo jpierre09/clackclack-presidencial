@@ -1465,17 +1465,31 @@ async def get_novelty_reports() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def resolve_novelty(novelty_id: int, resolved_by: str) -> bool:
+async def resolve_novelty(novelty_id: int, resolved_by: str,
+                          corrected_ph_votes: int | None = None) -> bool:
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT id FROM manual_validations WHERE id = ?", (novelty_id,)
+        "SELECT * FROM manual_validations WHERE id = ?", (novelty_id,)
     )
     if not rows:
         return False
+    mv = rows[0]
+    now = datetime.now().isoformat()
     await db.execute(
-        "UPDATE manual_validations SET resolved_at = ?, resolved_by = ? WHERE id = ?",
-        (datetime.now().isoformat(), resolved_by, novelty_id),
+        """UPDATE manual_validations
+           SET resolved_at = ?, resolved_by = ?,
+               corrected_ph_votes = COALESCE(?, corrected_ph_votes)
+           WHERE id = ?""",
+        (now, resolved_by, corrected_ph_votes, novelty_id),
     )
+    if corrected_ph_votes is not None:
+        await db.execute(
+            """UPDATE e14_results SET ph_total_votos = ?, status = 'corrected',
+               corrected_by = ?, corrected_at = ?
+               WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=? AND mesa=? AND corporacion=?""",
+            (corrected_ph_votes, resolved_by, now,
+             mv["municipio_cod"], mv["zona_cod"], mv["puesto_cod"], mv["mesa"], mv["corporacion"]),
+        )
     await db.commit()
     return True
 

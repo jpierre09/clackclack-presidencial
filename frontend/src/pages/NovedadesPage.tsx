@@ -24,7 +24,7 @@ export function NovedadesPage({ pendingCount }: Props) {
   const [items, setItems] = useState<NovedadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showResolved, setShowResolved] = useState(false);
-  const [resolvingId, setResolvingId] = useState<number | null>(null);
+  const [resolveModal, setResolveModal] = useState<{ item: NovedadItem; votes: string; saving: boolean; error: string } | null>(null);
 
   // Admin corrections tab
   const [valItems, setValItems] = useState<NovedadItem[]>([]);
@@ -84,17 +84,38 @@ export function NovedadesPage({ pendingCount }: Props) {
     }
   }
 
-  async function handleResolve(item: NovedadItem) {
+  function openResolveModal(item: NovedadItem) {
+    if (item.resolved_at != null) {
+      // Reabrir directamente sin modal
+      if (!adminToken) { setPendingItem(null); setTokenPrompt(true); return; }
+      void (async () => {
+        try {
+          await resolveNovedad(adminToken, item.id, true);
+          setItems(await getNovedades());
+        } catch { /* ignore */ }
+      })();
+      return;
+    }
     if (!adminToken) { setPendingItem(null); setTokenPrompt(true); return; }
-    setResolvingId(item.id);
+    setResolveModal({
+      item,
+      votes: item.corrected_ph_votes != null ? String(item.corrected_ph_votes) : String(item.ai_ph_votes ?? ""),
+      saving: false,
+      error: "",
+    });
+  }
+
+  async function submitResolve() {
+    if (!resolveModal || !adminToken) return;
+    const votes = resolveModal.votes !== "" ? parseInt(resolveModal.votes, 10) : undefined;
+    if (votes !== undefined && (isNaN(votes) || votes < 0)) return;
+    setResolveModal((m) => m ? { ...m, saving: true, error: "" } : null);
     try {
-      await resolveNovedad(adminToken, item.id, item.resolved_at != null);
-      const updated = await getNovedades();
-      setItems(updated);
-    } catch {
-      // ignore
-    } finally {
-      setResolvingId(null);
+      await resolveNovedad(adminToken, resolveModal.item.id, false, votes);
+      setResolveModal(null);
+      setItems(await getNovedades());
+    } catch (e) {
+      setResolveModal((m) => m ? { ...m, saving: false, error: String(e) } : null);
     }
   }
 
@@ -269,11 +290,10 @@ export function NovedadesPage({ pendingCount }: Props) {
               </button>
               <button
                 className={`novedad-resolve-btn${item.resolved_at ? " resolved" : ""}`}
-                disabled={resolvingId === item.id}
-                onClick={() => void handleResolve(item)}
+                onClick={() => openResolveModal(item)}
                 title={item.resolved_at ? "Marcar como pendiente" : "Marcar como resuelta"}
               >
-                {resolvingId === item.id ? "..." : item.resolved_at ? "↩ Reabrir" : "✓ Resolver"}
+                {item.resolved_at ? "↩ Reabrir" : "✓ Resolver"}
               </button>
             </div>
           </div>
@@ -430,6 +450,62 @@ export function NovedadesPage({ pendingCount }: Props) {
               }}
             >
               Continuar
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* Resolve novelty modal */}
+    {resolveModal && (
+      <div className="tinder-modal-overlay" onClick={() => setResolveModal(null)}>
+        <div className="tinder-modal tinder-modal--wide" onClick={(e) => e.stopPropagation()}>
+          <h2 className="tinder-modal-title">Resolver novedad</h2>
+          <p className="tinder-modal-ref">
+            {resolveModal.item.corporacion} · Mesa {resolveModal.item.mesa} ·{" "}
+            {resolveModal.item.municipio ?? resolveModal.item.municipio_cod}
+            {resolveModal.item.puesto_nombre && ` · ${resolveModal.item.puesto_nombre}`}
+          </p>
+          <blockquote className="novedad-note" style={{ marginBottom: "1rem" }}>
+            {resolveModal.item.novelty_note}
+          </blockquote>
+
+          {/* Screenshot */}
+          <div className="resolve-img-wrap">
+            <img
+              src={`/api/validar/screenshot/${resolveModal.item.municipio_cod}/${resolveModal.item.zona_cod}/${resolveModal.item.puesto_cod}/${resolveModal.item.mesa}/${resolveModal.item.corporacion}`}
+              alt="Recorte PDF"
+              className="resolve-img"
+            />
+          </div>
+
+          <div className="resolve-votes-row">
+            <label className="crop-votes-label">
+              Votos Pacto Histórico correctos:
+              <input
+                className="crop-votes-input"
+                type="number"
+                min="0"
+                autoFocus
+                placeholder={`IA: ${resolveModal.item.ai_ph_votes ?? "—"}`}
+                value={resolveModal.votes}
+                onChange={(e) => setResolveModal((m) => m ? { ...m, votes: e.target.value } : null)}
+                onKeyDown={(e) => { if (e.key === "Enter") void submitResolve(); if (e.key === "Escape") setResolveModal(null); }}
+              />
+            </label>
+            <span className="resolve-ai-ref">IA original: <strong>{resolveModal.item.ai_ph_votes ?? "—"}</strong></span>
+          </div>
+
+          {resolveModal.error && <p style={{ color: "#f87171", fontSize: "0.85rem", marginBottom: "0.5rem" }}>{resolveModal.error}</p>}
+
+          <div className="tinder-modal-actions">
+            <button className="tinder-btn" onClick={() => setResolveModal(null)}>Cancelar</button>
+            <button
+              className="tinder-btn approve"
+              disabled={resolveModal.saving}
+              onClick={submitResolve}
+            >
+              {resolveModal.saving ? "Guardando..." : "✓ Resolver"}
             </button>
           </div>
         </div>

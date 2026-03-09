@@ -131,12 +131,19 @@ export async function saveUserSettings(payload: UserSettings): Promise<void> {
   });
 }
 
-export async function resolveNovedad(adminToken: string, noveltyId: number, unresolve = false): Promise<void> {
+export async function resolveNovedad(
+  adminToken: string,
+  noveltyId: number,
+  unresolve = false,
+  correctedVotes?: number,
+): Promise<void> {
   const action = unresolve ? "unresolve" : "resolve";
+  const body: Record<string, unknown> = { admin_token: adminToken };
+  if (!unresolve && correctedVotes !== undefined) body.corrected_ph_votes = correctedVotes;
   const res = await fetch(withBase(`/api/validar/novedades/${noveltyId}/${action}`), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ admin_token: adminToken }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
