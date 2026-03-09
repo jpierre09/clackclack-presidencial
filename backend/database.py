@@ -212,6 +212,24 @@ CREATE TABLE IF NOT EXISTS crop_overrides (
     created_at TEXT NOT NULL,
     UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
 );
+
+CREATE INDEX IF NOT EXISTS idx_alerts_location
+    ON alerts(municipio_cod, zona_cod, puesto_cod, severity, is_resolved);
+
+CREATE INDEX IF NOT EXISTS idx_results_status
+    ON e14_results(status, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_results_location
+    ON e14_results(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_downloads_location
+    ON e14_downloads(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_validations_location
+    ON manual_validations(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_validations_action
+    ON manual_validations(action);
 """
 
 
