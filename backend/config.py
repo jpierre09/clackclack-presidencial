@@ -23,8 +23,12 @@ def env_int(name: str, default: int) -> int:
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
-E14_DOWNLOADS_DIR = BASE_DIR / "e14_downloads"
-DB_PATH = BASE_DIR / "clackclack.db"
+
+# Persistent storage: use PERSIST_DIR env var (e.g. /persist on Railway)
+# so the DB and downloads survive deploys. Falls back to BASE_DIR for local dev.
+_persist = Path(os.getenv("PERSIST_DIR", "")).resolve() if os.getenv("PERSIST_DIR") else BASE_DIR
+E14_DOWNLOADS_DIR = _persist / "e14_downloads"
+DB_PATH = _persist / "clackclack.db"
 FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
 FRONTEND_PUBLIC_DIR = FRONTEND_DIR / "public"
