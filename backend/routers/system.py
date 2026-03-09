@@ -465,53 +465,65 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
     from backend.services.ocr_processor import process_e14
 
     log = logging.getLogger(__name__)
-    process_ids: list[int] = payload.get("process", [])
-    delete_ids: list[int] = payload.get("delete", [])
+
+    # Filter to valid integers only (guards against null/undefined from frontend)
+    raw_process = payload.get("process", [])
+    raw_delete  = payload.get("delete", [])
+    process_ids = [int(x) for x in raw_process if x is not None]
+    delete_ids  = [int(x) for x in raw_delete  if x is not None]
+
+    CHUNK = 450  # stay well under SQLite's 999-variable limit
+
+    def _chunks(lst):
+        for i in range(0, len(lst), CHUNK):
+            yield lst[i:i + CHUNK]
 
     conn = await db.get_db()
 
     # Collect full metadata for process items before deleting results
     process_rows = []
-    if process_ids:
-        ph = ",".join("?" * len(process_ids))
-        process_rows = await conn.execute_fetchall(
+    for chunk in _chunks(process_ids):
+        ph = ",".join("?" * len(chunk))
+        rows = await conn.execute_fetchall(
             f"""SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
                        r.puesto_cod, r.mesa, r.corporacion, d.filepath
                 FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
                 WHERE r.id IN ({ph})""",
-            process_ids,
+            chunk,
         )
+        process_rows.extend(rows)
 
     # Collect filepath info for delete items
     delete_rows = []
-    if delete_ids:
-        ph = ",".join("?" * len(delete_ids))
-        delete_rows = await conn.execute_fetchall(
+    for chunk in _chunks(delete_ids):
+        ph = ",".join("?" * len(chunk))
+        rows = await conn.execute_fetchall(
             f"""SELECT r.id as result_id, r.download_id, d.filepath
                 FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
                 WHERE r.id IN ({ph})""",
-            delete_ids,
+            chunk,
         )
+        delete_rows.extend(rows)
 
     # Delete not_digitized result records for process items (keep download + PDF)
-    if process_ids:
-        ph = ",".join("?" * len(process_ids))
-        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", process_ids)
+    for chunk in _chunks(process_ids):
+        ph = ",".join("?" * len(chunk))
+        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
 
     # Hard-delete result + download + PDF for confirmed placeholders
-    if delete_ids:
-        ph = ",".join("?" * len(delete_ids))
-        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", delete_ids)
-        dl_ids = [r["download_id"] for r in delete_rows if r["download_id"]]
-        if dl_ids:
-            ph2 = ",".join("?" * len(dl_ids))
-            await conn.execute(f"DELETE FROM e14_downloads WHERE id IN ({ph2})", dl_ids)
-        for row in delete_rows:
-            if row["filepath"]:
-                try:
-                    _Path(row["filepath"]).unlink(missing_ok=True)
-                except Exception:
-                    pass
+    dl_ids = [r["download_id"] for r in delete_rows if r["download_id"]]
+    for chunk in _chunks([r["result_id"] for r in delete_rows]):
+        ph = ",".join("?" * len(chunk))
+        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
+    for chunk in _chunks(dl_ids):
+        ph = ",".join("?" * len(chunk))
+        await conn.execute(f"DELETE FROM e14_downloads WHERE id IN ({ph})", chunk)
+    for row in delete_rows:
+        if row["filepath"]:
+            try:
+                _Path(row["filepath"]).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     await conn.commit()
 
