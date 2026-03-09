@@ -5,6 +5,7 @@ import type {
   MapItem,
   MunicipioNode,
   NovedadItem,
+  ProgressData,
   ReclamationRequest,
   UserSettings,
   ValidationResponse,
@@ -128,6 +129,10 @@ export async function saveUserSettings(payload: UserSettings): Promise<void> {
     method: "PUT",
     body: JSON.stringify(payload),
   });
+}
+
+export async function getProgress(): Promise<ProgressData> {
+  return fetchJson<ProgressData>("/api/validar/progress");
 }
 
 export async function getNovedades(): Promise<NovedadItem[]> {

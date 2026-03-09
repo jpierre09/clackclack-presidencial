@@ -325,6 +325,12 @@ async def undo_validation(username: str = Depends(_require_auth)):
     return {"item": item, "stats": stats}
 
 
+@router.get("/progress")
+async def get_progress():
+    """Public progress dashboard: E14 downloaded / processed / validated."""
+    return await db.get_e14_progress()
+
+
 @router.get("/admin/users")
 async def list_users(admin_token: str = ""):
     if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):

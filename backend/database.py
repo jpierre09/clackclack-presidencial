@@ -1576,6 +1576,92 @@ async def save_crop_override(mun: str, zona: str, puesto: str, mesa: int,
     await db.commit()
 
 
+async def get_e14_progress() -> dict:
+    """Full progress stats: downloaded, processed, validated, by corp, by validator."""
+    db = await get_db()
+    rows = await db.execute_fetchall("""
+        SELECT
+            (SELECT SUM(mesas) FROM puestos)                                    AS total_mesas,
+            (SELECT COUNT(*) FROM e14_downloads)                                AS downloaded,
+            (SELECT COUNT(*) FROM e14_results WHERE status IN ('processed','corrected'))
+                                                                                AS processed,
+            (SELECT COUNT(*) FROM e14_results WHERE status = 'error')          AS errors,
+            (SELECT COUNT(*) FROM manual_validations)                           AS validated,
+            (SELECT COUNT(*) FROM manual_validations WHERE action='corrected')  AS corrected,
+            (SELECT COUNT(*) FROM manual_validations WHERE action='novelty'
+                OR (novelty_note IS NOT NULL AND novelty_note != ''))           AS novelty
+    """)
+    r = rows[0]
+    total_mesas   = r[0] or 0
+    downloaded    = r[1] or 0
+    processed     = r[2] or 0
+    errors        = r[3] or 0
+    validated     = r[4] or 0
+    corrected     = r[5] or 0
+    novelty       = r[6] or 0
+
+    # By corporacion
+    corp_rows = await db.execute_fetchall("""
+        SELECT
+            d.corporacion,
+            COUNT(DISTINCT d.id)   AS downloaded,
+            COUNT(DISTINCT CASE WHEN r.status IN ('processed','corrected') THEN r.id END) AS processed,
+            COUNT(DISTINCT mv.id)  AS validated
+        FROM e14_downloads d
+        LEFT JOIN e14_results r
+            ON r.municipio_cod=d.municipio_cod AND r.zona_cod=d.zona_cod
+            AND r.puesto_cod=d.puesto_cod AND r.mesa=d.mesa AND r.corporacion=d.corporacion
+        LEFT JOIN manual_validations mv
+            ON mv.municipio_cod=d.municipio_cod AND mv.zona_cod=d.zona_cod
+            AND mv.puesto_cod=d.puesto_cod AND mv.mesa=d.mesa AND mv.corporacion=d.corporacion
+        GROUP BY d.corporacion
+        ORDER BY d.corporacion
+    """)
+    by_corp = {}
+    for cr in corp_rows:
+        dl = cr["downloaded"] or 0
+        pr = cr["processed"] or 0
+        vl = cr["validated"] or 0
+        by_corp[cr["corporacion"]] = {
+            "downloaded": dl,
+            "processed":  pr,
+            "validated":  vl,
+            "pending":    max(0, pr - vl),
+        }
+
+    # By validator
+    val_rows = await db.execute_fetchall("""
+        SELECT
+            validated_by,
+            COUNT(*) AS total,
+            SUM(CASE WHEN action='approved' THEN 1 ELSE 0 END) AS approved,
+            SUM(CASE WHEN action='corrected' THEN 1 ELSE 0 END) AS corrected,
+            SUM(CASE WHEN action='novelty'
+                OR (novelty_note IS NOT NULL AND novelty_note != '') THEN 1 ELSE 0 END) AS novelty,
+            MAX(validated_at) AS last_at
+        FROM manual_validations
+        GROUP BY validated_by
+        ORDER BY total DESC
+    """)
+    by_validator = [dict(vr) for vr in val_rows]
+
+    return {
+        "total_mesas":  total_mesas,
+        "downloaded":   downloaded,
+        "processed":    processed,
+        "errors":       errors,
+        "validated":    validated,
+        "pending":      max(0, processed - validated),
+        "corrected":    corrected,
+        "novelty":      novelty,
+        "pct_downloaded": round(downloaded / total_mesas * 100, 1) if total_mesas else 0,
+        "pct_processed":  round(processed  / downloaded  * 100, 1) if downloaded  else 0,
+        "pct_validated":  round(validated  / processed   * 100, 1) if processed   else 0,
+        "by_corp":      by_corp,
+        "by_validator": by_validator,
+    }
+
+
 async def get_crop_override(mun: str, zona: str, puesto: str, mesa: int,
                              corp: str) -> tuple[float, float, float, float] | None:
     """Return (x0, y0, x1, y1) fractions if a manual crop override exists, else None."""

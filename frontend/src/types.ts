@@ -109,6 +109,38 @@ export interface MapItem {
   novelty_count: number;
 }
 
+export interface ProgressByCorp {
+  downloaded: number;
+  processed: number;
+  validated: number;
+  pending: number;
+}
+
+export interface ProgressByValidator {
+  validated_by: string;
+  total: number;
+  approved: number;
+  corrected: number;
+  novelty: number;
+  last_at: string | null;
+}
+
+export interface ProgressData {
+  total_mesas: number;
+  downloaded: number;
+  processed: number;
+  errors: number;
+  validated: number;
+  pending: number;
+  corrected: number;
+  novelty: number;
+  pct_downloaded: number;
+  pct_processed: number;
+  pct_validated: number;
+  by_corp: Record<string, ProgressByCorp>;
+  by_validator: ProgressByValidator[];
+}
+
 export interface ValidationResult {
   id: number;
   download_id: number;
