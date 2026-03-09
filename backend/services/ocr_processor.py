@@ -142,7 +142,7 @@ def _find_ph_votes(partidos: list[dict]) -> tuple[int | None, int | None]:
 
 async def process_e14(download_id: int, filepath: str,
                        municipio_cod: str, zona_cod: str, puesto_cod: str,
-                       mesa: int, corporacion: str):
+                       mesa: int, corporacion: str, skip_nd_check: bool = False):
     """Process a single E-14 PDF through Claude Vision and store results."""
     start_time = datetime.now()
 
@@ -151,9 +151,11 @@ async def process_e14(download_id: int, filepath: str,
         start_page, max_pages = _pages_for(corporacion)
 
         # ── Pre-check: skip PDFs that Registraduría hasn't digitized yet ──────
-        not_digitized = await loop.run_in_executor(
-            None, lambda: _page_is_not_digitized(filepath, start_page)
-        )
+        not_digitized = False
+        if not skip_nd_check:
+            not_digitized = await loop.run_in_executor(
+                None, lambda: _page_is_not_digitized(filepath, start_page)
+            )
         if not_digitized:
             await db.insert_result({
                 "download_id": download_id,

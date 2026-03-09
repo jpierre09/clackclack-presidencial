@@ -462,7 +462,7 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
     import logging
     from pathlib import Path as _Path
     from backend import database as db
-    from backend.services.local_ingest import ingest_file
+    from backend.services.ocr_processor import process_e14
 
     log = logging.getLogger(__name__)
     process_ids: list[int] = payload.get("process", [])
@@ -470,12 +470,13 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
 
     conn = await db.get_db()
 
-    # Collect filepath info for process items before deleting results
+    # Collect full metadata for process items before deleting results
     process_rows = []
     if process_ids:
         ph = ",".join("?" * len(process_ids))
         process_rows = await conn.execute_fetchall(
-            f"""SELECT r.id as result_id, r.download_id, d.filepath
+            f"""SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
+                       r.puesto_cod, r.mesa, r.corporacion, d.filepath
                 FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
                 WHERE r.id IN ({ph})""",
             process_ids,
@@ -514,16 +515,27 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
 
     await conn.commit()
 
-    # Queue OCR for process items in background
+    # Queue OCR for process items — skip_nd_check=True so user-approved records
+    # go directly to Claude OCR without re-running the not_digitized detection.
     async def _run_ocr():
         for row in process_rows:
             fp = row["filepath"]
-            if fp and _Path(fp).exists():
-                try:
-                    await ingest_file(_Path(fp))
-                except Exception as e:
-                    log.error("batch OCR error %s: %s", fp, e)
-            await asyncio.sleep(0.1)
+            if not fp or not _Path(fp).exists():
+                continue
+            try:
+                await process_e14(
+                    download_id=row["download_id"],
+                    filepath=fp,
+                    municipio_cod=row["municipio_cod"],
+                    zona_cod=row["zona_cod"],
+                    puesto_cod=row["puesto_cod"],
+                    mesa=row["mesa"],
+                    corporacion=row["corporacion"],
+                    skip_nd_check=True,
+                )
+            except Exception as e:
+                log.error("batch OCR error %s: %s", fp, e)
+            await asyncio.sleep(0.05)
 
     if process_rows:
         background_tasks.add_task(_run_ocr)
