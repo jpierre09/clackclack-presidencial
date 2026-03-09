@@ -413,51 +413,9 @@ async def scan_novedades_not_digitized():
     }
 
 
-@router.get("/not-digitized-list")
-async def not_digitized_list(corp: str = "SEN", limit: int = 100, offset: int = 0):
-    """Paginated list of not_digitized records with screenshot URL."""
-    from backend import database as db
-    conn = await db.get_db()
-    total_rows = await conn.execute_fetchall(
-        "SELECT COUNT(*) as n FROM e14_results WHERE status='not_digitized' AND corporacion=?",
-        (corp.upper(),)
-    )
-    total = total_rows[0]["n"] if total_rows else 0
-    rows = await conn.execute_fetchall(
-        """SELECT r.id as result_id, r.download_id,
-                  r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion,
-                  r.processed_at, r.error_message, d.filepath,
-                  p.municipio, p.nombre as puesto_nombre
-           FROM e14_results r
-           LEFT JOIN e14_downloads d ON d.id = r.download_id
-           LEFT JOIN puestos p ON (
-               p.municipio_cod = r.municipio_cod AND p.zona_cod = r.zona_cod
-               AND p.puesto_cod = r.puesto_cod
-           )
-           WHERE r.status = 'not_digitized' AND r.corporacion = ?
-           ORDER BY r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa
-           LIMIT ? OFFSET ?""",
-        (corp.upper(), limit, offset)
-    )
-    items = []
-    for row in rows:
-        d = dict(row)
-        d["screenshot_url"] = (
-            f"/api/validar/screenshot/{d['municipio_cod']}/{d['zona_cod']}"
-            f"/{d['puesto_cod']}/{d['mesa']}/{d['corporacion']}"
-        )
-        items.append(d)
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
-
-
-@router.post("/batch-review")
-async def batch_review(payload: dict, background_tasks: BackgroundTasks):
-    """Process a reviewed batch of not_digitized records.
-
-    Body: { "process": [result_id, ...], "delete": [result_id, ...] }
-    - process: delete the not_digitized result (keep PDF), queue for OCR in background
-    - delete: confirmed placeholder — delete result + download + PDF
-    """
+@router.post("/queue-all-not-digitized")
+async def queue_all_not_digitized(background_tasks: BackgroundTasks):
+    """Send every not_digitized E14 to OCR (skip_nd_check=True)."""
     import asyncio
     import logging
     from pathlib import Path as _Path
@@ -465,79 +423,31 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
     from backend.services.ocr_processor import process_e14
 
     log = logging.getLogger(__name__)
-
-    # Filter to valid integers only (guards against null/undefined from frontend)
-    raw_process = payload.get("process", [])
-    raw_delete  = payload.get("delete", [])
-    process_ids = [int(x) for x in raw_process if x is not None]
-    delete_ids  = [int(x) for x in raw_delete  if x is not None]
-
-    CHUNK = 450  # stay well under SQLite's 999-variable limit
-
-    def _chunks(lst):
-        for i in range(0, len(lst), CHUNK):
-            yield lst[i:i + CHUNK]
-
     conn = await db.get_db()
 
-    # Collect full metadata for process items before deleting results
-    process_rows = []
-    for chunk in _chunks(process_ids):
-        ph = ",".join("?" * len(chunk))
-        rows = await conn.execute_fetchall(
-            f"""SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
-                       r.puesto_cod, r.mesa, r.corporacion, d.filepath
-                FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
-                WHERE r.id IN ({ph})""",
-            chunk,
-        )
-        process_rows.extend(rows)
+    rows = await conn.execute_fetchall(
+        """SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
+                  r.puesto_cod, r.mesa, r.corporacion, d.filepath
+           FROM e14_results r
+           LEFT JOIN e14_downloads d ON d.id = r.download_id
+           WHERE r.status = 'not_digitized'"""
+    )
 
-    # Collect filepath info for delete items
-    delete_rows = []
-    for chunk in _chunks(delete_ids):
-        ph = ",".join("?" * len(chunk))
-        rows = await conn.execute_fetchall(
-            f"""SELECT r.id as result_id, r.download_id, d.filepath
-                FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
-                WHERE r.id IN ({ph})""",
-            chunk,
-        )
-        delete_rows.extend(rows)
-
-    # Delete not_digitized result records for process items (keep download + PDF)
-    for chunk in _chunks(process_ids):
+    # Delete all not_digitized result records so they can be re-inserted by OCR
+    result_ids = [r["result_id"] for r in rows]
+    CHUNK = 450
+    for i in range(0, len(result_ids), CHUNK):
+        chunk = result_ids[i:i + CHUNK]
         ph = ",".join("?" * len(chunk))
         await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
-
-    # Hard-delete result + download + PDF for confirmed placeholders
-    dl_ids = [r["download_id"] for r in delete_rows if r["download_id"]]
-    for chunk in _chunks([r["result_id"] for r in delete_rows]):
-        ph = ",".join("?" * len(chunk))
-        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
-    for chunk in _chunks(dl_ids):
-        ph = ",".join("?" * len(chunk))
-        await conn.execute(f"DELETE FROM e14_downloads WHERE id IN ({ph})", chunk)
-    for row in delete_rows:
-        if row["filepath"]:
-            try:
-                _Path(row["filepath"]).unlink(missing_ok=True)
-            except Exception:
-                pass
-
     await conn.commit()
 
-    # Queue OCR for process items — skip_nd_check=True so user-approved records
-    # go directly to Claude OCR without re-running the not_digitized detection.
-    # Guard: skip any mesa that already has a processed/corrected result so
-    # validated E14s can never be overwritten or re-queued.
     async def _run_ocr():
         ocr_conn = await db.get_db()
-        for row in process_rows:
+        for row in rows:
             fp = row["filepath"]
             if not fp or not _Path(fp).exists():
                 continue
-            # Skip if already validated
             existing = await ocr_conn.execute_fetchall(
                 """SELECT status FROM e14_results
                    WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
@@ -548,8 +458,6 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
                  row["mesa"], row["corporacion"]),
             )
             if existing:
-                log.info("batch OCR: skipping %s/%s mesa %s — ya validado",
-                         row["municipio_cod"], row["puesto_cod"], row["mesa"])
                 continue
             try:
                 await process_e14(
@@ -563,30 +471,11 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
                     skip_nd_check=True,
                 )
             except Exception as e:
-                log.error("batch OCR error %s: %s", fp, e)
+                log.error("queue-all-nd OCR error %s: %s", fp, e)
             await asyncio.sleep(0.05)
 
-    if process_rows:
-        background_tasks.add_task(_run_ocr)
-
-    return {
-        "queued_ocr": len(process_rows),
-        "deleted": len(delete_rows),
-    }
-
-
-@router.get("/not-digitized-count")
-async def not_digitized_count():
-    """Count PDFs that Registraduría hasn't digitized yet."""
-    from backend import database as db
-    conn = await db.get_db()
-    rows = await conn.execute_fetchall(
-        """SELECT corporacion, COUNT(*) as n
-           FROM e14_results WHERE status = 'not_digitized'
-           GROUP BY corporacion ORDER BY n DESC"""
-    )
-    total = sum(r["n"] for r in rows)
-    return {"total": total, "by_corp": [dict(r) for r in rows]}
+    background_tasks.add_task(_run_ocr)
+    return {"queued": len(rows)}
 
 
 @router.get("/status")

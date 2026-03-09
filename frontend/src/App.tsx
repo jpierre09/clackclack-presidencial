@@ -7,7 +7,6 @@ import { TopBar } from "./components/TopBar";
 import { useSSE } from "./hooks/useSSE";
 import { DashboardPage } from "./pages/DashboardPage";
 import { MapPage } from "./pages/MapPage";
-import { NotDigitizedPage } from "./pages/NotDigitizedPage";
 import { NovedadesPage } from "./pages/NovedadesPage";
 import { ProgressPage } from "./pages/ProgressPage";
 import { ResultsPage } from "./pages/ResultsPage";
@@ -20,7 +19,7 @@ import type {
   MunicipioNode,
 } from "./types";
 
-type PageId = "dashboard" | "results" | "map" | "novedades" | "progreso" | "no-digitalizados" | "settings";
+type PageId = "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings";
 
 export function App() {
   const [activePage, setActivePage] = useState<PageId>("dashboard");
@@ -111,8 +110,7 @@ export function App() {
         {activePage === "map" && <MapPage data={mapData} />}
         {activePage === "novedades" && <NovedadesPage pendingCount={summary?.novedades_count ?? 0} />}
         {activePage === "progreso" && <ProgressPage />}
-        {activePage === "no-digitalizados" && <NotDigitizedPage />}
-        {activePage === "settings" && <SettingsPage onRefresh={refreshData} />}
+{activePage === "settings" && <SettingsPage onRefresh={refreshData} />}
       </main>
     </div>
   );

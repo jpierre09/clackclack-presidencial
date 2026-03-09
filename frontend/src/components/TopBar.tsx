@@ -1,11 +1,11 @@
 interface TopBarProps {
   activePage: string;
-  onSelect: (page: "dashboard" | "results" | "map" | "novedades" | "progreso" | "no-digitalizados" | "settings") => void;
+  onSelect: (page: "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings") => void;
   novedadesCount?: number;
 }
 
 const pages: Array<{
-  id: "dashboard" | "results" | "map" | "novedades" | "progreso" | "no-digitalizados" | "settings";
+  id: "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings";
   label: string;
 }> = [
   { id: "dashboard", label: "Dashboard" },
@@ -13,7 +13,6 @@ const pages: Array<{
   { id: "map", label: "Mapa" },
   { id: "novedades", label: "Novedades" },
   { id: "progreso", label: "Progreso" },
-  { id: "no-digitalizados", label: "No Digit." },
   { id: "settings", label: "Config" },
 ];
 
