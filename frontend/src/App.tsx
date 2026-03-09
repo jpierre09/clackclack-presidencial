@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getAlerts, getCamaraLive, getHierarchy, getMapData, getSummary } from "./api";
 import { FilterBar } from "./components/FilterBar";
@@ -55,9 +55,13 @@ export function App() {
 
   useEffect(() => { void refreshData(); }, [refreshData]);
 
+  // Debounce SSE-triggered refreshes: burst of ocr_complete events only
+  // causes one refresh, fired 5s after the last event in the burst.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useSSE((event) => {
     if (["ocr_complete", "alert_created", "scan_complete", "remote_poll_complete"].includes(event.type)) {
-      void refreshData();
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => { void refreshData(); }, 5000);
     }
   });
 
