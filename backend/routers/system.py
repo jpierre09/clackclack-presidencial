@@ -414,7 +414,7 @@ async def scan_novedades_not_digitized():
 
 
 @router.get("/not-digitized-list")
-async def not_digitized_list(corp: str = "SEN", limit: int = 48, offset: int = 0):
+async def not_digitized_list(corp: str = "SEN", limit: int = 24, offset: int = 0):
     """Paginated list of not_digitized records with screenshot URL."""
     from backend import database as db
     conn = await db.get_db()
@@ -424,10 +424,12 @@ async def not_digitized_list(corp: str = "SEN", limit: int = 48, offset: int = 0
     )
     total = total_rows[0]["n"] if total_rows else 0
     rows = await conn.execute_fetchall(
-        """SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion,
-                  r.processed_at, r.error_message,
+        """SELECT r.id as result_id, r.download_id,
+                  r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion,
+                  r.processed_at, r.error_message, d.filepath,
                   p.municipio, p.nombre as puesto_nombre
            FROM e14_results r
+           LEFT JOIN e14_downloads d ON d.id = r.download_id
            LEFT JOIN puestos p ON (
                p.municipio_cod = r.municipio_cod AND p.zona_cod = r.zona_cod
                AND p.puesto_cod = r.puesto_cod
@@ -446,6 +448,90 @@ async def not_digitized_list(corp: str = "SEN", limit: int = 48, offset: int = 0
         )
         items.append(d)
     return {"total": total, "limit": limit, "offset": offset, "items": items}
+
+
+@router.post("/batch-review")
+async def batch_review(payload: dict, background_tasks: BackgroundTasks):
+    """Process a reviewed batch of not_digitized records.
+
+    Body: { "process": [result_id, ...], "delete": [result_id, ...] }
+    - process: delete the not_digitized result (keep PDF), queue for OCR in background
+    - delete: confirmed placeholder — delete result + download + PDF
+    """
+    import asyncio
+    import logging
+    from pathlib import Path as _Path
+    from backend import database as db
+    from backend.services.local_ingest import ingest_file
+
+    log = logging.getLogger(__name__)
+    process_ids: list[int] = payload.get("process", [])
+    delete_ids: list[int] = payload.get("delete", [])
+
+    conn = await db.get_db()
+
+    # Collect filepath info for process items before deleting results
+    process_rows = []
+    if process_ids:
+        ph = ",".join("?" * len(process_ids))
+        process_rows = await conn.execute_fetchall(
+            f"""SELECT r.id as result_id, r.download_id, d.filepath
+                FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
+                WHERE r.id IN ({ph})""",
+            process_ids,
+        )
+
+    # Collect filepath info for delete items
+    delete_rows = []
+    if delete_ids:
+        ph = ",".join("?" * len(delete_ids))
+        delete_rows = await conn.execute_fetchall(
+            f"""SELECT r.id as result_id, r.download_id, d.filepath
+                FROM e14_results r LEFT JOIN e14_downloads d ON d.id = r.download_id
+                WHERE r.id IN ({ph})""",
+            delete_ids,
+        )
+
+    # Delete not_digitized result records for process items (keep download + PDF)
+    if process_ids:
+        ph = ",".join("?" * len(process_ids))
+        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", process_ids)
+
+    # Hard-delete result + download + PDF for confirmed placeholders
+    if delete_ids:
+        ph = ",".join("?" * len(delete_ids))
+        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", delete_ids)
+        dl_ids = [r["download_id"] for r in delete_rows if r["download_id"]]
+        if dl_ids:
+            ph2 = ",".join("?" * len(dl_ids))
+            await conn.execute(f"DELETE FROM e14_downloads WHERE id IN ({ph2})", dl_ids)
+        for row in delete_rows:
+            if row["filepath"]:
+                try:
+                    _Path(row["filepath"]).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    await conn.commit()
+
+    # Queue OCR for process items in background
+    async def _run_ocr():
+        for row in process_rows:
+            fp = row["filepath"]
+            if fp and _Path(fp).exists():
+                try:
+                    await ingest_file(_Path(fp))
+                except Exception as e:
+                    log.error("batch OCR error %s: %s", fp, e)
+            await asyncio.sleep(0.1)
+
+    if process_rows:
+        background_tasks.add_task(_run_ocr)
+
+    return {
+        "queued_ocr": len(process_rows),
+        "deleted": len(delete_rows),
+    }
 
 
 @router.get("/not-digitized-count")
