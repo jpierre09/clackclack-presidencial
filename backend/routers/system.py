@@ -106,6 +106,34 @@ async def upload_e14(
     }
 
 
+@router.get("/ocr-errors")
+async def ocr_errors():
+    """Show top OCR error messages grouped by type."""
+    from backend import database as db
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """SELECT corporacion, error_message, COUNT(*) as n,
+                  MAX(processed_at) as last_at
+           FROM e14_results WHERE status='error'
+           GROUP BY corporacion, error_message
+           ORDER BY n DESC LIMIT 20"""
+    )
+    return [dict(r) for r in rows]
+
+
+@router.post("/retry-errors")
+async def retry_errors(limit: int = 20):
+    """Reset error-status results to allow re-processing."""
+    from backend import database as db
+    conn = await db.get_db()
+    await conn.execute(
+        "DELETE FROM e14_results WHERE status='error' LIMIT ?", (limit,)
+    )
+    await conn.commit()
+    result = await conn.execute_fetchall("SELECT changes() as n")
+    return {"deleted": result[0]["n"] if result else 0}
+
+
 @router.get("/status")
 async def status():
     return {
