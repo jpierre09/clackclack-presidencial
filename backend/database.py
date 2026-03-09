@@ -1633,7 +1633,7 @@ async def get_e14_progress() -> dict:
     db = await get_db()
     rows = await db.execute_fetchall("""
         SELECT
-            (SELECT SUM(mesas) FROM puestos)                                    AS total_mesas,
+            (SELECT SUM(mesas) * 2 FROM puestos)                               AS total_mesas,
             (SELECT COUNT(*) FROM e14_downloads)                                AS downloaded,
             (SELECT COUNT(*) FROM e14_results WHERE status IN ('processed','corrected'))
                                                                                 AS processed,

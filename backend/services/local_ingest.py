@@ -15,6 +15,7 @@ from backend.services.event_bus import event_bus
 FILE_RE = re.compile(r"^MESA_(\d{1,3})_(SEN|CAM)_.*\.pdf$", re.IGNORECASE)
 CODE_RE = re.compile(r"^(\d{2,3})-")
 _scan_lock = asyncio.Lock()
+_OCR_SEM = asyncio.Semaphore(8)  # max concurrent OCR jobs
 
 
 
@@ -91,7 +92,7 @@ async def _has_processed_result(meta: dict) -> bool:
     )
     if not rows:
         return False
-    return rows[0]["status"] in {"processed", "corrected"}
+    return rows[0]["status"] in {"processed", "corrected", "not_digitized"}
 
 
 async def ingest_file(pdf_path: Path) -> tuple[bool, str]:
@@ -133,20 +134,22 @@ async def scan_local_downloads(limit: int | None = None) -> dict:
 
     async with _scan_lock:
         pdf_files = sorted(E14_DOWNLOADS_DIR.rglob("*.pdf"))
+        if limit is not None:
+            pdf_files = pdf_files[:limit]
         stats = {"discovered": len(pdf_files), "processed": 0, "skipped": 0, "errors": 0}
 
-        for file_path in pdf_files:
-            if limit is not None and stats["processed"] >= limit:
-                break
-            try:
-                processed, reason = await ingest_file(file_path)
-                if processed:
-                    stats["processed"] += 1
-                else:
-                    stats["skipped"] += 1
-            except Exception:
-                stats["errors"] += 1
+        async def _process_one(file_path):
+            async with _OCR_SEM:
+                try:
+                    processed, reason = await ingest_file(file_path)
+                    if processed:
+                        stats["processed"] += 1
+                    else:
+                        stats["skipped"] += 1
+                except Exception:
+                    stats["errors"] += 1
 
+        await asyncio.gather(*[_process_one(p) for p in pdf_files])
         await event_bus.publish("scan_complete", stats)
         return stats
 

@@ -187,7 +187,33 @@ query AllTransmissionCodes($first: Int!, $status: Int!, $dept: String!, $corp: S
   }
 }
 """
+
+_QUERY_TRANSMISSION_CODES_BY_MUN = """
+query AllTransmissionCodesByMun($first: Int!, $status: Int!, $dept: String!, $corp: String!, $mun: String!) {
+  allTransmissionCodes(
+    first: $first
+    condition: {
+      idTransmissionCodeStatus: $status
+      idDepartmentCode: $dept
+      idCorporationCode: $corp
+      municipalityCode: $mun
+    }
+  ) {
+    nodes {
+      idDepartmentCode
+      municipalityCode
+      idZoneCode
+      standCode
+      numberStand
+      idCorporationCode
+      expectedName
+      idTransmissionCodeStatus
+    }
+  }
+}
+"""
 _PAGE_SIZE = 20000
+_MUN_PAGE_SIZE = 2000  # Per-municipality queries are much smaller
 
 
 class RemotePoller:
@@ -325,19 +351,49 @@ class RemotePoller:
                     log.warning("Catalogs not available yet")
                     return stats
 
-            # Fetch per dept+corp+status combination (4 small queries instead of 2 huge ones)
             dept = DEPT_CODE if DEPT_CODE not in ("ALL", "") else "01"
             nodes: list[dict] = []
+
+            # Get list of municipalities for this dept (used in per-mun fallback)
+            dept_muns = [k.split("|")[1] for k in self._mun_names if k.startswith(dept + "|")]
+
             for corp_code in ("001", "002"):  # SEN, CAM
                 for status in (3, 11):
-                    vars_ = {"first": _PAGE_SIZE, "status": status, "dept": dept, "corp": corp_code}
-                    data = await self._gql(client, _QUERY_TRANSMISSION_CODES, vars_)
-                    if not data:
-                        log.warning("allTransmissionCodes dept=%s corp=%s status=%s failed", dept, corp_code, status)
+                    # status=11 responses exceed AppSync's 6 MB limit at dept level.
+                    # Always query per-municipality for status=11 to guarantee full coverage.
+                    if status == 3:
+                        data = await self._gql(
+                            client, _QUERY_TRANSMISSION_CODES,
+                            {"first": _PAGE_SIZE, "status": status, "dept": dept, "corp": corp_code}
+                        )
+                    else:
+                        data = None  # force per-mun path for status=11
+
+                    if data is not None:
+                        batch = data.get("allTransmissionCodes", {}).get("nodes") or []
+                        nodes.extend(batch)
+                        log.info("dept=%s corp=%s status=%s → %s records", dept, corp_code, status, len(batch))
                         continue
-                    batch = data.get("allTransmissionCodes", {}).get("nodes") or []
-                    nodes.extend(batch)
-                    log.info("dept=%s corp=%s status=%s → %s records", dept, corp_code, status, len(batch))
+
+                    # Per-municipality queries (~125 small requests in parallel)
+                    log.info("per-mun queries for corp=%s status=%s (%d muns)",
+                             corp_code, status, len(dept_muns))
+                    mun_sem = asyncio.Semaphore(12)
+                    mun_nodes: list[dict] = []
+
+                    async def _query_mun(mun: str, _corp=corp_code, _status=status):
+                        async with mun_sem:
+                            d = await self._gql(
+                                client, _QUERY_TRANSMISSION_CODES_BY_MUN,
+                                {"first": _MUN_PAGE_SIZE, "status": _status,
+                                 "dept": dept, "corp": _corp, "mun": mun}
+                            )
+                        if d:
+                            mun_nodes.extend(d.get("allTransmissionCodes", {}).get("nodes") or [])
+
+                    await asyncio.gather(*[_query_mun(m) for m in dept_muns])
+                    nodes.extend(mun_nodes)
+                    log.info("per-mun corp=%s status=%s → %s records", corp_code, status, len(mun_nodes))
 
             # Filter: published (status 3 or 11) + SEN and CAM only (dept already filtered in query)
             filtered = []
@@ -362,7 +418,10 @@ class RemotePoller:
 
             E14_DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-            for row, dep, corp3, acronym, expected in filtered:
+            # ── Phase 1: parallel downloads ────────────────────────────────────
+            dl_sem = asyncio.Semaphore(20)
+
+            async def _download_one(row, dep, corp3, acronym, expected):
                 mun = str(row.get("municipalityCode") or "")
                 zone2 = str(row.get("idZoneCode") or "")
                 zone3 = _zfill(zone2, 3)
@@ -372,50 +431,59 @@ class RemotePoller:
                 unique_key = f"{dep}|{mun}|{zone3}|{stand2}|{mesa3}|{corp3}|{expected}"
                 if unique_key in self._known_keys:
                     stats["skipped"] += 1
-                    continue
+                    return None
 
                 target = self._target_path(dep, mun, zone2, stand2, mesa3, acronym, expected)
-
                 if target.exists() and _is_pdf(target):
                     self._known_keys.add(unique_key)
                     stats["skipped"] += 1
-                    continue
+                    return None
 
                 pdf_url = (
                     f"{_PDF_BASE}/{dep}/{mun}/{zone3}/{stand2}/{mesa3}"
                     f"/{acronym}/{expected}?uuid={_uuid.uuid4()}"
                 )
 
-                try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    r = await client.get(pdf_url, headers=_PDF_HEADERS, timeout=60)
-                    r.raise_for_status()
-
-                    target.write_bytes(r.content)
-
-                    if not _is_pdf(target):
+                async with dl_sem:
+                    try:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        r = await client.get(pdf_url, headers=_PDF_HEADERS, timeout=60)
+                        r.raise_for_status()
+                        target.write_bytes(r.content)
+                        if not _is_pdf(target):
+                            target.unlink(missing_ok=True)
+                            log.warning("Not a valid PDF: %s", pdf_url)
+                            stats["errors"] += 1
+                            return None
+                        self._known_keys.add(unique_key)
+                        stats["downloaded"] += 1
+                        return target
+                    except Exception as exc:
+                        log.error("Failed to download %s: %s", pdf_url, exc)
                         target.unlink(missing_ok=True)
-                        log.warning("Not a valid PDF: %s", pdf_url)
                         stats["errors"] += 1
-                        continue
+                        return None
 
-                    self._known_keys.add(unique_key)
-                    stats["downloaded"] += 1
-                    log.info("Downloaded: %s", target.name)
+            downloaded = await asyncio.gather(
+                *[_download_one(*args) for args in filtered]
+            )
 
-                except Exception as exc:
-                    log.error("Failed to download %s: %s", pdf_url, exc)
-                    target.unlink(missing_ok=True)
-                    stats["errors"] += 1
-                    continue
+            # ── Phase 2: parallel OCR ingestion ───────────────────────────────
+            ocr_sem = asyncio.Semaphore(8)
 
-                try:
-                    ok, _ = await ingest_file(target)
-                    if ok:
-                        stats["processed"] += 1
-                except Exception as exc:
-                    log.error("Ingest failed for %s: %s", target, exc)
-                    stats["errors"] += 1
+            async def _ingest_one(target):
+                if target is None:
+                    return
+                async with ocr_sem:
+                    try:
+                        ok, _ = await ingest_file(target)
+                        if ok:
+                            stats["processed"] += 1
+                    except Exception as exc:
+                        log.error("Ingest failed for %s: %s", target, exc)
+                        stats["errors"] += 1
+
+            await asyncio.gather(*[_ingest_one(t) for t in downloaded])
 
         await event_bus.publish("remote_poll_complete", stats)
         return stats

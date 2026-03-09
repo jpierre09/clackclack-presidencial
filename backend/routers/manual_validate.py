@@ -388,6 +388,67 @@ async def unresolve_novelty(novelty_id: int, req: ResolveNoveltyRequest):
     return {"status": "ok"}
 
 
+class DeleteNoveltyRequest(BaseModel):
+    admin_token: str
+
+
+@router.delete("/novedades/{novelty_id}")
+async def delete_novelty_and_reprocess(novelty_id: int, req: DeleteNoveltyRequest):
+    """Admin: delete a novelty + its OCR result + download record + PDF so the poller re-downloads it."""
+    from pathlib import Path as _Path
+
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """SELECT mv.id as mv_id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod,
+                  mv.mesa, mv.corporacion,
+                  r.id as result_id, r.download_id, d.filepath
+           FROM manual_validations mv
+           JOIN e14_results r ON (
+               r.municipio_cod = mv.municipio_cod AND r.zona_cod = mv.zona_cod AND
+               r.puesto_cod = mv.puesto_cod AND r.mesa = mv.mesa AND r.corporacion = mv.corporacion
+           )
+           LEFT JOIN e14_downloads d ON d.id = r.download_id
+           WHERE mv.id = ?""",
+        (novelty_id,)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Novedad no encontrada")
+
+    row = rows[0]
+
+    # 1. Release queue claims
+    await conn.execute(
+        "DELETE FROM queue_claims WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=? AND mesa=? AND corporacion=?",
+        (row["municipio_cod"], row["zona_cod"], row["puesto_cod"], row["mesa"], row["corporacion"])
+    )
+    # 2. Delete the novelty
+    await conn.execute("DELETE FROM manual_validations WHERE id = ?", (row["mv_id"],))
+    # 3. Delete OCR result
+    await conn.execute("DELETE FROM e14_results WHERE id = ?", (row["result_id"],))
+    # 4. Delete download record
+    if row["download_id"]:
+        await conn.execute("DELETE FROM e14_downloads WHERE id = ?", (row["download_id"],))
+    await conn.commit()
+
+    # 5. Remove PDF from disk
+    deleted_file = False
+    if row["filepath"]:
+        try:
+            _Path(row["filepath"]).unlink(missing_ok=True)
+            deleted_file = True
+        except Exception:
+            pass
+
+    return {
+        "status": "ok",
+        "deleted_file": deleted_file,
+        "message": "Novedad eliminada — PDF será re-descargado y procesado en el próximo ciclo.",
+    }
+
+
 @router.get("/novedades/export")
 async def export_novedades():
     """Download all novelty reports as Excel."""

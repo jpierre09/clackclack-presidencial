@@ -68,7 +68,7 @@ PH_PATTERNS = ["PACTO", "PACT0", "PACTC", "HISTORICO", "HIST0RICO"]
 # Claude OCR settings
 CLAUDE_DPI = 150
 CLAUDE_MAX_PAGES_SEN = 1       # Only page 5 (PACTO page) — set via page offset below
-CLAUDE_MAX_PAGES_CAM = 3
+CLAUDE_MAX_PAGES_CAM = 1
 CLAUDE_SEN_PACTO_PAGE = env_int("CLAUDE_SEN_PACTO_PAGE", 5)   # 1-indexed PDF page with Pacto SEN
 CLAUDE_CAM_PACTO_PAGE = env_int("CLAUDE_CAM_PACTO_PAGE", 1)   # 1-indexed PDF page with Pacto CAM
 

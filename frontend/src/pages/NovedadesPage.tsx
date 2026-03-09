@@ -24,6 +24,9 @@ export function NovedadesPage({ pendingCount }: Props) {
   const [items, setItems] = useState<NovedadItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [showResolved, setShowResolved] = useState(false);
+  const [filterMun, setFilterMun] = useState("");
+  const [filterZona, setFilterZona] = useState("");
+  const [filterPuesto, setFilterPuesto] = useState("");
   const [resolveModal, setResolveModal] = useState<{ item: NovedadItem; votes: string; saving: boolean; error: string } | null>(null);
 
   // Admin corrections tab
@@ -239,13 +242,70 @@ export function NovedadesPage({ pendingCount }: Props) {
           Descargar (.xlsx)
         </button>
       </div>
+
+      <div className="novedades-filters">
+        <input
+          className="novedades-filter-input"
+          placeholder="Municipio..."
+          value={filterMun}
+          onChange={(e) => setFilterMun(e.target.value)}
+        />
+        <input
+          className="novedades-filter-input"
+          placeholder="Zona (ej. 01)..."
+          value={filterZona}
+          onChange={(e) => setFilterZona(e.target.value)}
+        />
+        <input
+          className="novedades-filter-input"
+          placeholder="Puesto (nombre o código)..."
+          value={filterPuesto}
+          onChange={(e) => setFilterPuesto(e.target.value)}
+        />
+        {(filterMun || filterZona || filterPuesto) && (
+          <button
+            className="novedades-filter-clear"
+            onClick={() => { setFilterMun(""); setFilterZona(""); setFilterPuesto(""); }}
+          >
+            ✕ Limpiar
+          </button>
+        )}
+      </div>
+
       {loading && <p className="inline-note">Cargando novedades...</p>}
-      {!loading && items.filter(i => showResolved || !i.resolved_at).length === 0 && (
-        <div className="novedades-empty"><p>No hay novedades {showResolved ? "" : "pendientes"}.</p></div>
-      )}
+      {!loading && (() => {
+        const visible = items.filter((i) => {
+          if (!showResolved && i.resolved_at) return false;
+          if (filterMun) {
+            const q = filterMun.toLowerCase();
+            if (!(i.municipio ?? i.municipio_cod).toLowerCase().includes(q)) return false;
+          }
+          if (filterZona && !i.zona_cod.includes(filterZona)) return false;
+          if (filterPuesto) {
+            const q = filterPuesto.toLowerCase();
+            if (!(i.puesto_nombre ?? "").toLowerCase().includes(q) && !i.puesto_cod.includes(filterPuesto)) return false;
+          }
+          return true;
+        });
+        return visible.length === 0 ? (
+          <div className="novedades-empty"><p>No hay novedades que coincidan con los filtros.</p></div>
+        ) : null;
+      })()}
 
       <div className="novedades-list">
-        {items.filter(i => showResolved || !i.resolved_at).map((item) => (
+        {items.filter((i) => {
+          if (!showResolved && i.resolved_at) return false;
+          if (filterMun) {
+            const q = filterMun.toLowerCase();
+            if (!(i.municipio ?? i.municipio_cod).toLowerCase().includes(q)) return false;
+          }
+          if (filterZona && !i.zona_cod.includes(filterZona)) return false;
+          if (filterPuesto) {
+            const q = filterPuesto.toLowerCase();
+            if (!(i.puesto_nombre ?? "").toLowerCase().includes(q) && !i.puesto_cod.includes(filterPuesto)) return false;
+          }
+          return true;
+        }).map((item) => (
           <div key={item.id} className={`novedad-card${item.action === "corrected" ? " corrected" : ""}${item.resolved_at ? " resolved-novelty" : ""}`}>
             <div className="novedad-header">
               <span className="novedad-corp">{item.corporacion}</span>
