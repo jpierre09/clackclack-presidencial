@@ -413,9 +413,8 @@ async def scan_novedades_not_digitized():
     }
 
 
-@router.post("/queue-all-not-digitized")
-async def queue_all_not_digitized(background_tasks: BackgroundTasks):
-    """Send every not_digitized E14 to OCR (skip_nd_check=True)."""
+async def _run_ocr_concurrent(rows, skip_nd_check: bool = True, concurrency: int = 5):
+    """Process a list of download rows concurrently."""
     import asyncio
     import logging
     from pathlib import Path as _Path
@@ -423,42 +422,25 @@ async def queue_all_not_digitized(background_tasks: BackgroundTasks):
     from backend.services.ocr_processor import process_e14
 
     log = logging.getLogger(__name__)
-    conn = await db.get_db()
+    sem = asyncio.Semaphore(concurrency)
 
-    rows = await conn.execute_fetchall(
-        """SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
-                  r.puesto_cod, r.mesa, r.corporacion, d.filepath
-           FROM e14_results r
-           LEFT JOIN e14_downloads d ON d.id = r.download_id
-           WHERE r.status = 'not_digitized'"""
-    )
-
-    # Delete all not_digitized result records so they can be re-inserted by OCR
-    result_ids = [r["result_id"] for r in rows]
-    CHUNK = 450
-    for i in range(0, len(result_ids), CHUNK):
-        chunk = result_ids[i:i + CHUNK]
-        ph = ",".join("?" * len(chunk))
-        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
-    await conn.commit()
-
-    async def _run_ocr():
+    async def _one(row):
+        fp = row["filepath"]
+        if not fp or not _Path(fp).exists():
+            return
         ocr_conn = await db.get_db()
-        for row in rows:
-            fp = row["filepath"]
-            if not fp or not _Path(fp).exists():
-                continue
-            existing = await ocr_conn.execute_fetchall(
-                """SELECT status FROM e14_results
-                   WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
-                     AND mesa=? AND corporacion=?
-                     AND status IN ('processed','corrected')
-                   LIMIT 1""",
-                (row["municipio_cod"], row["zona_cod"], row["puesto_cod"],
-                 row["mesa"], row["corporacion"]),
-            )
-            if existing:
-                continue
+        existing = await ocr_conn.execute_fetchall(
+            """SELECT status FROM e14_results
+               WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+                 AND mesa=? AND corporacion=?
+                 AND status IN ('processed','corrected')
+               LIMIT 1""",
+            (row["municipio_cod"], row["zona_cod"], row["puesto_cod"],
+             row["mesa"], row["corporacion"]),
+        )
+        if existing:
+            return
+        async with sem:
             try:
                 await process_e14(
                     download_id=row["download_id"],
@@ -468,13 +450,63 @@ async def queue_all_not_digitized(background_tasks: BackgroundTasks):
                     puesto_cod=row["puesto_cod"],
                     mesa=row["mesa"],
                     corporacion=row["corporacion"],
-                    skip_nd_check=True,
+                    skip_nd_check=skip_nd_check,
                 )
             except Exception as e:
-                log.error("queue-all-nd OCR error %s: %s", fp, e)
-            await asyncio.sleep(0.05)
+                log.error("concurrent OCR error %s: %s", fp, e)
 
-    background_tasks.add_task(_run_ocr)
+    await asyncio.gather(*[_one(row) for row in rows])
+
+
+@router.post("/queue-all-not-digitized")
+async def queue_all_not_digitized(background_tasks: BackgroundTasks):
+    """Send every not_digitized E14 to OCR (skip_nd_check=True), 5 concurrent."""
+    from backend import database as db
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """SELECT r.id as result_id, r.download_id, r.municipio_cod, r.zona_cod,
+                  r.puesto_cod, r.mesa, r.corporacion, d.filepath
+           FROM e14_results r
+           LEFT JOIN e14_downloads d ON d.id = r.download_id
+           WHERE r.status = 'not_digitized'"""
+    )
+
+    result_ids = [r["result_id"] for r in rows]
+    CHUNK = 450
+    for i in range(0, len(result_ids), CHUNK):
+        chunk = result_ids[i:i + CHUNK]
+        ph = ",".join("?" * len(chunk))
+        await conn.execute(f"DELETE FROM e14_results WHERE id IN ({ph})", chunk)
+    await conn.commit()
+
+    background_tasks.add_task(_run_ocr_concurrent, rows)
+    return {"queued": len(rows)}
+
+
+@router.post("/queue-orphan-downloads")
+async def queue_orphan_downloads(background_tasks: BackgroundTasks):
+    """Queue downloads that have no e14_results record (e.g. after a crashed OCR task)."""
+    from backend import database as db
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """SELECT d.id as download_id, d.municipio_cod, d.zona_cod,
+                  d.puesto_cod, d.mesa, d.corporacion, d.filepath
+           FROM e14_downloads d
+           WHERE NOT EXISTS (
+               SELECT 1 FROM e14_results r
+               WHERE r.municipio_cod = d.municipio_cod
+                 AND r.zona_cod      = d.zona_cod
+                 AND r.puesto_cod    = d.puesto_cod
+                 AND r.mesa          = d.mesa
+                 AND r.corporacion   = d.corporacion
+           )
+           AND d.filepath IS NOT NULL"""
+    )
+    # Normalize row shape for _run_ocr_concurrent
+    rows = [dict(r) | {"result_id": None} for r in rows]
+    background_tasks.add_task(_run_ocr_concurrent, rows)
     return {"queued": len(rows)}
 
 
