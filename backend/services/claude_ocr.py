@@ -120,11 +120,12 @@ def _is_spend_limit_error(status_code: int, body: str) -> bool:
 # PDF preparation: trim to only the pages we need
 # ---------------------------------------------------------------------------
 
-def prepare_pdf_bytes(pdf_path: str, max_pages: Optional[int] = None,
+def prepare_pdf_bytes(pdf_path: str, max_pages: int = 1,
                       start_page: int = 0) -> bytes:
     """Return bytes for PDF pages [start_page, start_page+max_pages).
 
-    start_page is 0-indexed. max_pages=None means read to end.
+    start_page is 0-indexed. max_pages defaults to 1 (safe minimum).
+    Pass max_pages=None explicitly only if you intentionally want all remaining pages.
     """
     doc = fitz.open(pdf_path)
     num_pages = len(doc)
@@ -416,7 +417,7 @@ def _build_messages_pdf(pdf_b64: str) -> list[dict]:
 
 def process_e14_pdf(pdf_path: str, api_key: str = "",
                     model: str = CLAUDE_MODEL,
-                    max_pages: Optional[int] = None,
+                    max_pages: int = 1,
                     start_page: int = 0) -> dict:
     """Process a single E-14 PDF through Claude Vision.
 
@@ -435,7 +436,8 @@ def process_e14_pdf(pdf_path: str, api_key: str = "",
     doc = fitz.open(pdf_path)
     total_pages = len(doc)
     doc.close()
-    pages_sent = min(total_pages, max_pages) if max_pages else total_pages
+    available = max(0, total_pages - start_page)
+    pages_sent = min(available, max_pages) if max_pages else available
 
     # 2. Call Claude API — con rotación automática de claves
     messages = _build_messages_pdf(pdf_b64)
@@ -731,10 +733,11 @@ def _validate_global(norm: dict) -> dict:
 
 async def process_e14_pdf_async(pdf_path: str, api_key: str = "",
                                  model: str = CLAUDE_MODEL,
-                                 max_pages: Optional[int] = None) -> dict:
+                                 max_pages: Optional[int] = None,
+                                 start_page: int = 0) -> dict:
     """Async wrapper - runs the sync API call in a thread."""
     import asyncio
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
-        None, lambda: process_e14_pdf(pdf_path, api_key, model, max_pages)
+        None, lambda: process_e14_pdf(pdf_path, api_key, model, max_pages, start_page)
     )
