@@ -363,31 +363,51 @@ export function NovedadesPage({ pendingCount }: Props) {
 
       {correctTarget && (
         <div className="tinder-modal-overlay" onClick={() => { setCorrectTarget(null); setCorrectValue(""); }}>
-          <div className="tinder-modal" onClick={(e) => e.stopPropagation()}>
+          <div className="tinder-modal tinder-modal--wide" onClick={(e) => e.stopPropagation()}>
             <h2 className="tinder-modal-title">Corregir validación #{correctTarget.id}</h2>
             <p className="tinder-modal-ref">
               {correctTarget.corporacion} · Mesa {correctTarget.mesa} ·{" "}
               {correctTarget.municipio ?? correctTarget.municipio_cod}
+              {correctTarget.puesto_nombre && ` · ${correctTarget.puesto_nombre}`}
             </p>
-            <p className="tinder-modal-ref" style={{ fontSize: "0.85rem", color: "#94a3b8" }}>
-              Validado por {correctTarget.validated_by} · Votos IA: {correctTarget.ai_ph_votes ?? "—"}
+            <p className="tinder-modal-ref" style={{ fontSize: "0.82rem", color: "#94a3b8" }}>
+              Validado por <strong>{correctTarget.validated_by}</strong> ·{" "}
+              {new Date(correctTarget.validated_at).toLocaleString("es-CO")}
             </p>
-            <label className="crop-votes-label">
-              Valor correcto de votos PH:
-              <input
-                className="tinder-edit-input crop-votes-input"
-                type="number"
-                min="0"
-                autoFocus
-                placeholder="ej. 26"
-                value={correctValue}
-                onChange={(e) => setCorrectValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void saveCorrection();
-                  if (e.key === "Escape") { setCorrectTarget(null); setCorrectValue(""); }
-                }}
+
+            <div className="resolve-img-wrap">
+              <img
+                src={`/api/validar/screenshot/${correctTarget.municipio_cod}/${correctTarget.zona_cod}/${correctTarget.puesto_cod}/${correctTarget.mesa}/${correctTarget.corporacion}`}
+                alt="Recorte PDF"
+                className="resolve-img"
               />
-            </label>
+            </div>
+
+            <div className="resolve-votes-row">
+              <label className="crop-votes-label">
+                Valor correcto de votos PH:
+                <input
+                  className="tinder-edit-input crop-votes-input"
+                  type="number"
+                  min="0"
+                  autoFocus
+                  placeholder="ej. 26"
+                  value={correctValue}
+                  onChange={(e) => setCorrectValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void saveCorrection();
+                    if (e.key === "Escape") { setCorrectTarget(null); setCorrectValue(""); }
+                  }}
+                />
+              </label>
+              <span className="resolve-ai-ref">
+                IA original: <strong>{correctTarget.ai_ph_votes ?? "—"}</strong>
+                {correctTarget.corrected_ph_votes != null && (
+                  <> · Corregido: <strong>{correctTarget.corrected_ph_votes}</strong></>
+                )}
+              </span>
+            </div>
+
             {correctError && <p style={{ color: "#f87171", fontSize: "0.85rem", marginBottom: "0.5rem" }}>{correctError}</p>}
             <div className="tinder-modal-actions">
               <button className="tinder-btn" onClick={() => { setCorrectTarget(null); setCorrectValue(""); }}>Cancelar</button>
