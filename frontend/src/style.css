@@ -2278,6 +2278,7 @@ select {
   border-radius: 999px;
 }
 .nd-corp-toggle { display: flex; border-radius: 6px; overflow: hidden; border: 1px solid #2a2a2a; }
+.nd-size-toggle { display: flex; border-radius: 6px; overflow: hidden; border: 1px solid #2a2a2a; margin-left: 0.5rem; }
 .corp-btn {
   background: #1a1a1a;
   color: var(--muted);

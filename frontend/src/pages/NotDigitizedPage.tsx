@@ -22,10 +22,11 @@ interface NdResponse {
   items: NdItem[];
 }
 
-const BATCH_SIZE = 24;
+const BATCH_OPTIONS = [24, 48, 100, 200] as const;
 
 export function NotDigitizedPage() {
   const [corp, setCorp] = useState<"SEN" | "CAM">("SEN");
+  const [batchSize, setBatchSize] = useState<number>(48);
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<NdResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -34,24 +35,24 @@ export function NotDigitizedPage() {
   const [submitting, setSubmitting] = useState(false);
   const [lastResult, setLastResult] = useState<{ queued: number; deleted: number } | null>(null);
 
-  const loadBatch = useCallback((c: string, off: number) => {
+  const loadBatch = useCallback((c: string, off: number, size: number) => {
     setLoading(true);
     setData(null);
     setMarkedDelete(new Set());
     setLastResult(null);
-    fetch(`/api/system/not-digitized-list?corp=${c}&limit=${BATCH_SIZE}&offset=${off}`)
+    fetch(`/api/system/not-digitized-list?corp=${c}&limit=${size}&offset=${off}`)
       .then((r) => r.json())
       .then(setData)
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    loadBatch(corp, offset);
-  }, [corp, offset, loadBatch]);
+    loadBatch(corp, offset, batchSize);
+  }, [corp, offset, batchSize, loadBatch]);
 
   useEffect(() => {
     setOffset(0);
-  }, [corp]);
+  }, [corp, batchSize]);
 
   function toggleMark(id: number) {
     setMarkedDelete((prev) => {
@@ -80,7 +81,7 @@ export function NotDigitizedPage() {
       const result = await r.json();
       setLastResult({ queued: result.queued_ocr ?? 0, deleted: result.deleted ?? 0 });
       // Advance: next batch (same offset since records were removed)
-      loadBatch(corp, offset);
+      loadBatch(corp, offset, batchSize);
     } catch {
       setLastResult(null);
     } finally {
@@ -90,8 +91,8 @@ export function NotDigitizedPage() {
 
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
-  const totalPages = Math.ceil(total / BATCH_SIZE);
-  const currentPage = Math.floor(offset / BATCH_SIZE) + 1;
+  const totalPages = Math.ceil(total / batchSize);
+  const currentPage = Math.floor(offset / batchSize) + 1;
   const toDelete = markedDelete.size;
   const toOcr = items.length - toDelete;
 
@@ -114,6 +115,18 @@ export function NotDigitizedPage() {
               onClick={() => setCorp(c)}
             >
               {c}
+            </button>
+          ))}
+        </div>
+        <div className="nd-size-toggle">
+          {BATCH_OPTIONS.map((n) => (
+            <button
+              key={n}
+              type="button"
+              className={`corp-btn${batchSize === n ? " active" : ""}`}
+              onClick={() => setBatchSize(n)}
+            >
+              {n}
             </button>
           ))}
         </div>
@@ -185,7 +198,7 @@ export function NotDigitizedPage() {
             <button
               type="button"
               className="nd-page-btn"
-              onClick={() => setOffset(Math.max(0, offset - BATCH_SIZE))}
+              onClick={() => setOffset(Math.max(0, offset - batchSize))}
               disabled={offset === 0 || submitting}
             >
               ‹ Anterior
@@ -194,7 +207,7 @@ export function NotDigitizedPage() {
             <button
               type="button"
               className="nd-page-btn"
-              onClick={() => setOffset(offset + BATCH_SIZE)}
+              onClick={() => setOffset(offset + batchSize)}
               disabled={currentPage >= totalPages || submitting}
             >
               Siguiente ›
