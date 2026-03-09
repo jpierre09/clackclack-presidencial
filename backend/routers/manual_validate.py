@@ -325,6 +325,26 @@ async def undo_validation(username: str = Depends(_require_auth)):
     return {"item": item, "stats": stats}
 
 
+@router.get("/admin/users")
+async def list_users(admin_token: str = ""):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall("SELECT id, username, is_active FROM users ORDER BY id")
+    return [dict(r) for r in rows]
+
+
+@router.delete("/admin/sessions")
+async def clear_all_sessions(admin_token: str = ""):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    conn = await db.get_db()
+    await conn.execute("DELETE FROM sessions")
+    await conn.execute("DELETE FROM queue_claims")
+    await conn.commit()
+    return {"status": "ok", "message": "Todas las sesiones y claims cerrados"}
+
+
 @router.get("/novedades")
 async def get_novedades():
     return await db.get_novelty_reports()
