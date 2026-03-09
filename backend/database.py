@@ -502,7 +502,8 @@ async def insert_result(data: dict) -> int:
             processing_time_s = excluded.processing_time_s,
             status = excluded.status,
             error_message = excluded.error_message,
-            processed_at = excluded.processed_at""",
+            processed_at = excluded.processed_at
+        WHERE e14_results.status NOT IN ('processed', 'corrected')""",
         (
             data["download_id"],
             data["municipio_cod"],

@@ -517,10 +517,27 @@ async def batch_review(payload: dict, background_tasks: BackgroundTasks):
 
     # Queue OCR for process items — skip_nd_check=True so user-approved records
     # go directly to Claude OCR without re-running the not_digitized detection.
+    # Guard: skip any mesa that already has a processed/corrected result so
+    # validated E14s can never be overwritten or re-queued.
     async def _run_ocr():
+        ocr_conn = await db.get_db()
         for row in process_rows:
             fp = row["filepath"]
             if not fp or not _Path(fp).exists():
+                continue
+            # Skip if already validated
+            existing = await ocr_conn.execute_fetchall(
+                """SELECT status FROM e14_results
+                   WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+                     AND mesa=? AND corporacion=?
+                     AND status IN ('processed','corrected')
+                   LIMIT 1""",
+                (row["municipio_cod"], row["zona_cod"], row["puesto_cod"],
+                 row["mesa"], row["corporacion"]),
+            )
+            if existing:
+                log.info("batch OCR: skipping %s/%s mesa %s — ya validado",
+                         row["municipio_cod"], row["puesto_cod"], row["mesa"])
                 continue
             try:
                 await process_e14(
