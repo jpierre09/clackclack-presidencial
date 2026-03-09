@@ -39,26 +39,33 @@ async def remote_poll_once():
 
 
 @router.post("/sftp-sync")
-async def sftp_sync():
-    """Manually trigger an SFTP download cycle."""
+async def sftp_sync(background_tasks: BackgroundTasks):
+    """Manually trigger an SFTP download cycle (runs in background)."""
     if not SFTP_READY:
         return {
             "status": "waiting",
             "reason": "SFTP credentials not configured. Set SFTP_HOST, SFTP_USER, SFTP_PASS.",
         }
 
-    from backend.services.sftp_downloader import download_new_pdfs
-    from backend.services.local_ingest import ingest_file
-    from pathlib import Path
+    async def _run():
+        import logging
+        log = logging.getLogger(__name__)
+        from backend.services.sftp_downloader import download_new_pdfs
+        from backend.services.local_ingest import ingest_file
+        from pathlib import Path
+        try:
+            new_files = await download_new_pdfs()
+            processed = 0
+            for meta in new_files:
+                ok, _ = await ingest_file(Path(meta["local_path"]))
+                if ok:
+                    processed += 1
+            log.info("SFTP sync done: %d downloaded, %d processed", len(new_files), processed)
+        except Exception as e:
+            log.error("SFTP sync background error: %s", e)
 
-    new_files = await download_new_pdfs()
-    processed = 0
-    for meta in new_files:
-        ok, _ = await ingest_file(Path(meta["local_path"]))
-        if ok:
-            processed += 1
-
-    return {"status": "ok", "downloaded": len(new_files), "processed": processed}
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "SFTP sync running in background"}
 
 
 @router.post("/upload-e14")
