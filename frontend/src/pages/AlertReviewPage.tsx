@@ -63,6 +63,13 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
         }
         return nextItems[0]?.id ?? null;
       });
+      // Warm server + browser cache for first 3 items on load
+      for (const item of nextItems.slice(0, 3)) {
+        for (const path of [item.sen.screenshot_path, item.cam.screenshot_path]) {
+          const img = new Image();
+          img.src = apiPath(path);
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "No fue posible cargar las alertas.");
     } finally {
@@ -136,6 +143,21 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
     () => items.find((item) => item.id === selectedId) ?? null,
     [items, selectedId]
   );
+
+  // Prefetch screenshots for current + next item so images are ready instantly
+  useEffect(() => {
+    const toPreload: string[] = [];
+    const currentIndex = items.findIndex((item) => item.id === selectedId);
+    const targets = [items[currentIndex], items[currentIndex + 1]].filter(Boolean);
+    for (const item of targets) {
+      toPreload.push(apiPath(item.sen.screenshot_path));
+      toPreload.push(apiPath(item.cam.screenshot_path));
+    }
+    for (const src of toPreload) {
+      const img = new Image();
+      img.src = src;
+    }
+  }, [selectedId, items]);
 
   const submitDecision = async (decision: AlertReviewDecision) => {
     if (!selectedItem) return;
