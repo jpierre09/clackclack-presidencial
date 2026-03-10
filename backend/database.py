@@ -18,6 +18,8 @@ async def get_db() -> aiosqlite.Connection:
         _db.row_factory = aiosqlite.Row
         await _db.execute("PRAGMA journal_mode=WAL")
         await _db.execute("PRAGMA foreign_keys=ON")
+        await _db.execute("PRAGMA busy_timeout=5000")
+        await _db.execute("PRAGMA cache_size=-65536")  # 64 MB page cache
     return _db
 
 
@@ -245,6 +247,16 @@ CREATE INDEX IF NOT EXISTS idx_queue_claims_corp
 
 CREATE INDEX IF NOT EXISTS idx_alerts_review_order
     ON alerts(alert_type, is_resolved, review_decision, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_pending
+    ON alerts(alert_type, created_at DESC)
+    WHERE is_resolved = 0 AND review_decision IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_e14_results_download_id
+    ON e14_results(download_id);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_full_location
+    ON alerts(municipio_cod, zona_cod, puesto_cod, mesa);
 """
 
 
@@ -721,118 +733,134 @@ async def get_dashboard_summary() -> dict:
 
 
 async def get_hierarchy() -> list[dict]:
-    """Get hierarchical data: municipio > zona > puesto with alert counts."""
+    """Get hierarchical data: municipio > zona > puesto > mesas.
+
+    Replaces the old N+1 nested loop (9 000+ queries) with 3 flat queries
+    that are then assembled into the tree in Python.
+    """
     db = await get_db()
 
-    # Get all municipios with their alert counts
-    rows = await db.execute_fetchall("""
+    # ── Query 1: all puestos for Antioquia with per-puesto alert count ─────────
+    puesto_rows = await db.execute_fetchall("""
         SELECT
-            p.municipio_cod,
-            p.municipio,
-            SUM(p.mesas) as total_mesas,
-            COUNT(DISTINCT a_d.id) as alerts_danger,
-            COUNT(DISTINCT a_w.id) as alerts_warning
+            p.municipio_cod, p.municipio,
+            p.zona_cod, p.puesto_cod, p.nombre, p.mesas, p.lat, p.lon,
+            COUNT(DISTINCT a.id) AS alert_count
         FROM puestos p
-        LEFT JOIN alerts a_d ON a_d.municipio_cod = p.municipio_cod
-            AND a_d.is_resolved = 0 AND a_d.severity = 'danger'
-        LEFT JOIN alerts a_w ON a_w.municipio_cod = p.municipio_cod
-            AND a_w.is_resolved = 0 AND a_w.severity = 'warning'
+        LEFT JOIN alerts a ON a.municipio_cod = p.municipio_cod
+            AND a.zona_cod = p.zona_cod AND a.puesto_cod = p.puesto_cod
+            AND a.is_resolved = 0
         WHERE p.departamento = 'ANTIOQUIA'
-        GROUP BY p.municipio_cod, p.municipio
+        GROUP BY p.municipio_cod, p.zona_cod, p.puesto_cod
+        ORDER BY p.municipio_cod, p.zona_cod, p.puesto_cod
     """)
 
+    # ── Query 2: all mesas data flat (one row per mesa) ────────────────────────
+    mesa_rows = await db.execute_fetchall("""
+        SELECT
+            d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa,
+            rs.ph_total_votos AS sen_votes, rc.ph_total_votos AS cam_votes,
+            rs.status AS sen_status, rc.status AS cam_status,
+            rs.ocr_confidence AS sen_conf, rc.ocr_confidence AS cam_conf,
+            a.alert_type, a.severity, a.discrepancy_pct,
+            CASE WHEN mv_n.id IS NOT NULL THEN 1 ELSE 0 END AS has_novelty
+        FROM (
+            SELECT DISTINCT d2.municipio_cod, d2.zona_cod, d2.puesto_cod, d2.mesa
+            FROM e14_downloads d2
+            JOIN puestos p2 ON p2.municipio_cod = d2.municipio_cod
+                AND p2.zona_cod = d2.zona_cod AND p2.puesto_cod = d2.puesto_cod
+                AND p2.departamento = 'ANTIOQUIA'
+        ) d
+        LEFT JOIN e14_results rs ON rs.municipio_cod = d.municipio_cod
+            AND rs.zona_cod = d.zona_cod AND rs.puesto_cod = d.puesto_cod
+            AND rs.mesa = d.mesa AND rs.corporacion = 'SEN'
+        LEFT JOIN e14_results rc ON rc.municipio_cod = d.municipio_cod
+            AND rc.zona_cod = d.zona_cod AND rc.puesto_cod = d.puesto_cod
+            AND rc.mesa = d.mesa AND rc.corporacion = 'CAM'
+        LEFT JOIN alerts a ON a.municipio_cod = d.municipio_cod
+            AND a.zona_cod = d.zona_cod AND a.puesto_cod = d.puesto_cod
+            AND a.mesa = d.mesa AND a.is_resolved = 0 AND a.severity != 'info'
+        LEFT JOIN manual_validations mv_n ON mv_n.municipio_cod = d.municipio_cod
+            AND mv_n.zona_cod = d.zona_cod AND mv_n.puesto_cod = d.puesto_cod
+            AND mv_n.mesa = d.mesa
+            AND mv_n.novelty_note IS NOT NULL AND mv_n.novelty_note != ''
+        ORDER BY d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa
+    """)
+
+    # ── Query 3: municipio-level danger / warning counts ───────────────────────
+    alert_rows = await db.execute_fetchall("""
+        SELECT municipio_cod,
+            COUNT(DISTINCT CASE WHEN severity = 'danger'  THEN id END) AS alerts_danger,
+            COUNT(DISTINCT CASE WHEN severity = 'warning' THEN id END) AS alerts_warning
+        FROM alerts
+        WHERE is_resolved = 0
+        GROUP BY municipio_cod
+    """)
+    mun_alerts: dict[str, dict] = {r["municipio_cod"]: dict(r) for r in alert_rows}
+
+    # ── Assemble tree in Python ────────────────────────────────────────────────
+    mesas_by_puesto: dict[tuple, list] = defaultdict(list)
+    for r in mesa_rows:
+        key = (r["municipio_cod"], r["zona_cod"], r["puesto_cod"])
+        mesas_by_puesto[key].append({
+            "mesa": r["mesa"],
+            "sen_votes": r["sen_votes"], "cam_votes": r["cam_votes"],
+            "sen_status": r["sen_status"], "cam_status": r["cam_status"],
+            "sen_conf": r["sen_conf"], "cam_conf": r["cam_conf"],
+            "alert_type": r["alert_type"], "severity": r["severity"],
+            "discrepancy_pct": r["discrepancy_pct"],
+            "has_novelty": r["has_novelty"],
+        })
+
+    puestos_by_zona: dict[tuple, list] = defaultdict(list)
+    for r in puesto_rows:
+        pkey = (r["municipio_cod"], r["zona_cod"], r["puesto_cod"])
+        zkey = (r["municipio_cod"], r["zona_cod"])
+        puestos_by_zona[zkey].append({
+            "puesto_cod": r["puesto_cod"], "nombre": r["nombre"],
+            "mesas": r["mesas"], "lat": r["lat"], "lon": r["lon"],
+            "alert_count": r["alert_count"],
+            "mesas_data": mesas_by_puesto.get(pkey, []),
+        })
+
+    seen_zonas: set[tuple] = set()
+    zonas_by_mun: dict[str, list] = defaultdict(list)
+    for r in puesto_rows:
+        zkey = (r["municipio_cod"], r["zona_cod"])
+        if zkey in seen_zonas:
+            continue
+        seen_zonas.add(zkey)
+        puestos = puestos_by_zona[zkey]
+        zonas_by_mun[r["municipio_cod"]].append({
+            "zona_cod": r["zona_cod"],
+            "total_mesas": sum(p["mesas"] for p in puestos),
+            "alert_count": sum(p["alert_count"] for p in puestos),
+            "puestos": puestos,
+        })
+
+    seen_muns: set[str] = set()
     municipios = []
-    for r in rows:
-        mun = dict(r)
-        # Get zonas for this municipio
-        zonas_rows = await db.execute_fetchall("""
-            SELECT
-                p.zona_cod,
-                SUM(p.mesas) as total_mesas,
-                COUNT(DISTINCT a.id) as alert_count
-            FROM puestos p
-            LEFT JOIN alerts a ON a.municipio_cod = p.municipio_cod
-                AND a.zona_cod = p.zona_cod AND a.is_resolved = 0
-            WHERE p.municipio_cod = ?
-            GROUP BY p.zona_cod
-            ORDER BY p.zona_cod
-        """, (mun["municipio_cod"],))
+    for r in puesto_rows:
+        mun_cod = r["municipio_cod"]
+        if mun_cod in seen_muns:
+            continue
+        seen_muns.add(mun_cod)
+        zonas = zonas_by_mun[mun_cod]
+        ac = mun_alerts.get(mun_cod, {})
+        municipios.append({
+            "municipio_cod": mun_cod,
+            "municipio": r["municipio"],
+            "total_mesas": sum(z["total_mesas"] for z in zonas),
+            "alerts_danger": int(ac.get("alerts_danger", 0) or 0),
+            "alerts_warning": int(ac.get("alerts_warning", 0) or 0),
+            "zonas": zonas,
+        })
 
-        zonas = []
-        for z in zonas_rows:
-            zona = dict(z)
-            # Get puestos for this zona
-            puestos_rows = await db.execute_fetchall("""
-                SELECT
-                    p.puesto_cod, p.nombre, p.mesas, p.lat, p.lon,
-                    COUNT(DISTINCT a.id) as alert_count
-                FROM puestos p
-                LEFT JOIN alerts a ON a.municipio_cod = p.municipio_cod
-                    AND a.zona_cod = p.zona_cod AND a.puesto_cod = p.puesto_cod
-                    AND a.is_resolved = 0
-                WHERE p.municipio_cod = ? AND p.zona_cod = ?
-                GROUP BY p.puesto_cod
-                ORDER BY p.puesto_cod
-            """, (mun["municipio_cod"], zona["zona_cod"]))
-
-            puestos = []
-            for pu in puestos_rows:
-                puesto = dict(pu)
-                # Get mesas for this puesto
-                mesas_rows = await db.execute_fetchall("""
-                    SELECT
-                        m.mesa,
-                        rs.ph_total_votos as sen_votes,
-                        rc.ph_total_votos as cam_votes,
-                        rs.status as sen_status,
-                        rc.status as cam_status,
-                        rs.ocr_confidence as sen_conf,
-                        rc.ocr_confidence as cam_conf,
-                        a.alert_type, a.severity, a.discrepancy_pct,
-                        CASE WHEN EXISTS (
-                            SELECT 1 FROM manual_validations mv2
-                            WHERE mv2.municipio_cod = ? AND mv2.zona_cod = ?
-                              AND mv2.puesto_cod = ? AND mv2.mesa = m.mesa
-                              AND mv2.novelty_note IS NOT NULL AND mv2.novelty_note != ''
-                        ) THEN 1 ELSE 0 END as has_novelty
-                    FROM (
-                        SELECT DISTINCT mesa FROM e14_downloads
-                        WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
-                    ) m
-                    LEFT JOIN e14_results rs ON rs.municipio_cod = ?
-                        AND rs.zona_cod = ? AND rs.puesto_cod = ?
-                        AND rs.mesa = m.mesa AND rs.corporacion = 'SEN'
-                    LEFT JOIN e14_results rc ON rc.municipio_cod = ?
-                        AND rc.zona_cod = ? AND rc.puesto_cod = ?
-                        AND rc.mesa = m.mesa AND rc.corporacion = 'CAM'
-                    LEFT JOIN alerts a ON a.municipio_cod = ?
-                        AND a.zona_cod = ? AND a.puesto_cod = ?
-                        AND a.mesa = m.mesa AND a.is_resolved = 0
-                        AND a.severity != 'info'
-                    ORDER BY m.mesa
-                """, (mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
-                      mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
-                      mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
-                      mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"],
-                      mun["municipio_cod"], zona["zona_cod"], puesto["puesto_cod"]))
-
-                puesto["mesas_data"] = [dict(mr) for mr in mesas_rows]
-                puestos.append(puesto)
-
-            zona["puestos"] = puestos
-            zonas.append(zona)
-
-        mun["zonas"] = zonas
-        municipios.append(mun)
-
-    municipios.sort(
-        key=lambda item: (
-            -int(item.get("alerts_danger", 0) or 0) - int(item.get("alerts_warning", 0) or 0),
-            -int(item.get("alerts_danger", 0) or 0),
-            str(item.get("municipio", "")),
-        )
-    )
-
+    municipios.sort(key=lambda item: (
+        -(item["alerts_danger"] + item["alerts_warning"]),
+        -item["alerts_danger"],
+        item["municipio"],
+    ))
     return municipios
 
 

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSSE } from "../hooks/useSSE";
 
 interface ValidateItem {
   municipio_cod: string;
@@ -65,6 +66,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
       // Prefetch next item's screenshot so it's in browser cache when needed
       if (data.prefetch_url) {
         const img = new Image();
+        img.onerror = () => { /* prefetch miss — will load on-demand */ };
         img.src = data.prefetch_url;
       }
     } finally {
@@ -91,15 +93,21 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
 
   useEffect(() => { void fetchNext(); }, [fetchNext]);
 
-  // Auto-poll every 6s when queue is empty (new PDFs may arrive at any time)
+  // When queue is empty: listen for SSE ocr_complete events to fetch immediately,
+  // plus a 30s fallback poll in case SSE is disconnected.
+  const queueEmpty = !loading && !item;
+  useSSE(useCallback((event) => {
+    if (queueEmpty && event.type === "ocr_complete") void fetchNext();
+  }, [queueEmpty, fetchNext]));
+
   useEffect(() => {
-    if (!loading && !item) {
-      pollRef.current = setInterval(() => { void fetchNext(); }, 6000);
-    } else {
+    if (!queueEmpty) {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      return;
     }
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [loading, item, fetchNext]);
+    pollRef.current = setInterval(() => { void fetchNext(); }, 30000);
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  }, [queueEmpty, fetchNext]);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -229,7 +237,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
                 {stats.total_novelty} novedades
               </p>
             )}
-            <p className="tinder-hint">Verificando automáticamente cada 6 segundos</p>
+            <p className="tinder-hint">Notificación automática al llegar nuevos E14</p>
             {canUndo && (
               <button className="tinder-undo-btn" onClick={undoLast}>
                 ↩ Deshacer última validación
