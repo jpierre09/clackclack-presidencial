@@ -510,6 +510,55 @@ async def queue_orphan_downloads(background_tasks: BackgroundTasks):
     return {"queued": len(rows)}
 
 
+@router.post("/admin/patch-novelty")
+async def patch_novelty(
+    municipio_cod: str,
+    zona_cod: str,
+    puesto_cod: str,
+    mesa: int,
+    note: str,
+    admin_token: str,
+):
+    """Mark SEN+CAM for a given mesa as novelty (admin only, protected by VALIDATE_SETUP_TOKEN)."""
+    import secrets as _sec
+    from backend.config import VALIDATE_SETUP_TOKEN
+    from backend import database as db
+    from datetime import datetime
+
+    if not VALIDATE_SETUP_TOKEN or not _sec.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    conn = await db.get_db()
+    now = datetime.now().isoformat()
+    patched = []
+    for corp in ("SEN", "CAM"):
+        await conn.execute("""
+            INSERT INTO manual_validations
+                (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+                 action, corrected_ph_votes, novelty_note, validated_by, validated_at)
+            VALUES (?, ?, ?, ?, ?, 'novelty', NULL, ?, 'admin_patch', ?)
+            ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+            DO UPDATE SET
+                action = 'novelty',
+                corrected_ph_votes = NULL,
+                novelty_note = excluded.novelty_note,
+                validated_by = 'admin_patch',
+                validated_at = excluded.validated_at
+        """, (municipio_cod, zona_cod, puesto_cod, mesa, corp, note, now))
+        patched.append(corp)
+
+    # Dismiss any existing vote_discrepancy alert for this mesa
+    await conn.execute("""
+        UPDATE alerts SET is_resolved = 1, resolved_at = ?, resolved_by = 'admin_patch'
+        WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=? AND mesa=?
+          AND alert_type='vote_discrepancy' AND is_resolved=0
+    """, (now, municipio_cod, zona_cod, puesto_cod, mesa))
+
+    await conn.commit()
+    return {"status": "ok", "patched": patched, "note": note}
+
+
 @router.get("/status")
 async def status():
     return {
