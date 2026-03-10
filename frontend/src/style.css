@@ -258,6 +258,17 @@ select {
   border-color: #b71820;
 }
 
+.action-btn.undo {
+  background: transparent;
+  border-color: var(--muted);
+  color: var(--muted);
+  margin-left: 0;
+}
+.action-btn.undo:hover:not(:disabled) {
+  border-color: var(--text);
+  color: var(--text);
+}
+
 .alert-badge {
   display: inline-flex;
   align-items: center;

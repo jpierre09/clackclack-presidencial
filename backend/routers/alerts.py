@@ -93,6 +93,26 @@ async def recent_real_alerts(limit: int = 10):
     return [dict(r) for r in rows]
 
 
+@router.put("/{alert_id}/undo-review")
+async def undo_review(alert_id: int):
+    """Revert a review decision back to pending (review_decision = NULL)."""
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        "SELECT id FROM alerts WHERE id = ? AND review_decision IS NOT NULL", (alert_id,)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Alerta no encontrada o sin decision")
+    await conn.execute(
+        """UPDATE alerts SET review_decision = NULL, reviewed_at = NULL,
+           reviewed_by = NULL, is_resolved = 0, resolved_at = NULL, resolved_by = NULL
+           WHERE id = ?""",
+        (alert_id,),
+    )
+    await conn.commit()
+    _review_cache.clear()
+    return {"status": "reverted", "id": alert_id}
+
+
 @router.put("/{alert_id}/review")
 async def review_alert(alert_id: int, payload: AlertReviewRequest):
     ok = await db.review_alert(alert_id, payload.decision, payload.reviewed_by or "dashboard")

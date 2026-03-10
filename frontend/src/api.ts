@@ -89,6 +89,10 @@ export async function correctAlertVotes(
   });
 }
 
+export async function undoReviewAlert(alertId: number): Promise<void> {
+  await fetchJson(`/api/alerts/${alertId}/undo-review`, { method: "PUT" });
+}
+
 export async function resolveAlert(alertId: number): Promise<void> {
   await fetchJson(`/api/alerts/${alertId}/resolve`, { method: "PUT" });
 }

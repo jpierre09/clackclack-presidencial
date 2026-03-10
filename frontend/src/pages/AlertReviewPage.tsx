@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { apiPath, correctAlertVotes, getAlertReviewItems, reviewAlert } from "../api";
+import { apiPath, correctAlertVotes, getAlertReviewItems, reviewAlert, undoReviewAlert } from "../api";
 import { AlertLegend } from "../components/AlertLegend";
 import type { AlertReviewDecision, AlertReviewItem } from "../types";
 
@@ -43,6 +43,8 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [savingDecision, setSavingDecision] = useState<AlertReviewDecision | null>(null);
+  const [lastDecision, setLastDecision] = useState<{ id: number; item: AlertReviewItem; index: number } | null>(null);
+  const [undoing, setUndoing] = useState(false);
   const [editingCorp, setEditingCorp] = useState<"SEN" | "CAM" | null>(null);
   const [editValue, setEditValue] = useState("");
   const [savingVotes, setSavingVotes] = useState(false);
@@ -152,6 +154,28 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
     }
   };
 
+  const undoDecision = async () => {
+    if (!lastDecision) return;
+    setUndoing(true);
+    setError("");
+    try {
+      await undoReviewAlert(lastDecision.id);
+      // Re-insert the item at its original position
+      const restored = { ...lastDecision.item, review_decision: null, reviewed_at: null, reviewed_by: null };
+      setItems((prev) => {
+        const next = [...prev];
+        next.splice(Math.min(lastDecision.index, next.length), 0, restored);
+        return next;
+      });
+      setSelectedId(lastDecision.id);
+      setLastDecision(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No fue posible deshacer.");
+    } finally {
+      setUndoing(false);
+    }
+  };
+
   useEffect(() => {
     void load();
   }, [reviewed, selectedMunicipio]);
@@ -190,6 +214,7 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
 
     try {
       await reviewAlert(selectedItem.id, decision);
+      setLastDecision({ id: selectedItem.id, item: selectedItem, index: currentIndex });
       // Silent background refresh — no spinner, no view jump
       void silentRefresh();
       void onRefresh();
@@ -364,7 +389,7 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
                   <button
                     type="button"
                     className="action-btn"
-                    disabled={savingDecision !== null}
+                    disabled={savingDecision !== null || undoing}
                     onClick={() => void submitDecision("real_alert")}
                   >
                     {savingDecision === "real_alert" ? "Guardando..." : "Marcar alerta real"}
@@ -372,11 +397,21 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
                   <button
                     type="button"
                     className="action-btn danger"
-                    disabled={savingDecision !== null}
+                    disabled={savingDecision !== null || undoing}
                     onClick={() => void submitDecision("false_alert")}
                   >
                     {savingDecision === "false_alert" ? "Guardando..." : "Marcar falsa alerta"}
                   </button>
+                  {lastDecision && (
+                    <button
+                      type="button"
+                      className="action-btn undo"
+                      disabled={undoing}
+                      onClick={() => void undoDecision()}
+                    >
+                      {undoing ? "Deshaciendo..." : "↩ Deshacer última"}
+                    </button>
+                  )}
                 </div>
               ) : selectedItem.reviewed_at ? (
                 <p className="inline-note">
