@@ -613,6 +613,56 @@ select {
   font-size: 1.25rem;
 }
 
+.review-stat-value.editable {
+  cursor: pointer;
+  border-bottom: 1px dashed var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 1.1rem;
+}
+.review-stat-value.editable:hover {
+  color: var(--accent);
+}
+
+.review-stat-edit {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.review-stat-input {
+  width: 5rem;
+  padding: 0.25rem 0.4rem;
+  background: var(--surface);
+  border: 1px solid var(--accent);
+  border-radius: 0.4rem;
+  color: var(--text);
+  font-size: 1rem;
+}
+
+.review-stat-save {
+  padding: 0.25rem 0.55rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 0.4rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.review-stat-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.review-stat-cancel {
+  padding: 0.25rem 0.45rem;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+.review-stat-cancel:hover { color: var(--text); }
+
 .review-actions {
   display: flex;
   gap: 0.7rem;

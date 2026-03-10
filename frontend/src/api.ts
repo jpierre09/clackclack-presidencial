@@ -77,6 +77,18 @@ export async function reviewAlert(
   });
 }
 
+export async function correctAlertVotes(
+  alertId: number,
+  corp: "SEN" | "CAM",
+  votes: number,
+  reviewedBy = "dashboard"
+): Promise<void> {
+  await fetchJson(`/api/alerts/${alertId}/correct-votes`, {
+    method: "PUT",
+    body: JSON.stringify({ corp, votes, reviewed_by: reviewedBy }),
+  });
+}
+
 export async function resolveAlert(alertId: number): Promise<void> {
   await fetchJson(`/api/alerts/${alertId}/resolve`, { method: "PUT" });
 }

@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { apiPath, getAlertReviewItems, reviewAlert } from "../api";
+import { apiPath, correctAlertVotes, getAlertReviewItems, reviewAlert } from "../api";
 import { AlertLegend } from "../components/AlertLegend";
 import type { AlertReviewDecision, AlertReviewItem } from "../types";
 
@@ -43,6 +43,10 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [savingDecision, setSavingDecision] = useState<AlertReviewDecision | null>(null);
+  const [editingCorp, setEditingCorp] = useState<"SEN" | "CAM" | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [savingVotes, setSavingVotes] = useState(false);
+  const editRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState("");
 
   const load = async () => {
@@ -77,6 +81,41 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
       setError(err instanceof Error ? err.message : "No fue posible cargar más alertas.");
     } finally {
       setLoadingMore(false);
+    }
+  };
+
+  const openEdit = (corp: "SEN" | "CAM") => {
+    const current = corp === "SEN" ? selectedItem?.sen.validated_votes : selectedItem?.cam.validated_votes;
+    setEditingCorp(corp);
+    setEditValue(current != null ? String(current) : "");
+    setTimeout(() => editRef.current?.focus(), 50);
+  };
+
+  const saveVotes = async () => {
+    if (!selectedItem || !editingCorp) return;
+    const val = parseInt(editValue, 10);
+    if (isNaN(val) || val < 0) return;
+    setSavingVotes(true);
+    setError("");
+    try {
+      await correctAlertVotes(selectedItem.id, editingCorp, val);
+      // Update local state immediately
+      setItems((prev) =>
+        prev.map((item) => {
+          if (item.id !== selectedItem.id) return item;
+          const corpKey = editingCorp.toLowerCase() as "sen" | "cam";
+          return {
+            ...item,
+            [corpKey]: { ...item[corpKey], validated_votes: val, corrected_ph_votes: val },
+          };
+        })
+      );
+      setEditingCorp(null);
+      setEditValue("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No fue posible guardar los votos.");
+    } finally {
+      setSavingVotes(false);
     }
   };
 
@@ -211,14 +250,55 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
               </div>
 
               <div className="review-summary-grid">
-                <div className="review-stat">
-                  <span>Senado validado</span>
-                  <strong>{selectedItem.sen.validated_votes ?? "-"}</strong>
-                </div>
-                <div className="review-stat">
-                  <span>Camara validada</span>
-                  <strong>{selectedItem.cam.validated_votes ?? "-"}</strong>
-                </div>
+                {(["SEN", "CAM"] as const).map((corp) => {
+                  const corpKey = corp.toLowerCase() as "sen" | "cam";
+                  const label = corp === "SEN" ? "Senado validado" : "Camara validada";
+                  const isEditing = editingCorp === corp;
+                  return (
+                    <div key={corp} className="review-stat">
+                      <span>{label}</span>
+                      {isEditing ? (
+                        <div className="review-stat-edit">
+                          <input
+                            ref={editRef}
+                            type="number"
+                            min="0"
+                            className="review-stat-input"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") void saveVotes();
+                              if (e.key === "Escape") { setEditingCorp(null); setEditValue(""); }
+                            }}
+                          />
+                          <button
+                            type="button"
+                            className="review-stat-save"
+                            disabled={savingVotes || editValue === ""}
+                            onClick={() => void saveVotes()}
+                          >
+                            {savingVotes ? "..." : "OK"}
+                          </button>
+                          <button
+                            type="button"
+                            className="review-stat-cancel"
+                            onClick={() => { setEditingCorp(null); setEditValue(""); }}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <strong
+                          className="review-stat-value editable"
+                          title="Clic para editar"
+                          onClick={() => openEdit(corp)}
+                        >
+                          {selectedItem[corpKey].validated_votes ?? "-"} ✎
+                        </strong>
+                      )}
+                    </div>
+                  );
+                })}
                 <div className="review-stat">
                   <span>Diferencia en votos</span>
                   <strong>{selectedItem.vote_gap ?? "-"}</strong>

@@ -74,6 +74,46 @@ async def review_alert(alert_id: int, payload: AlertReviewRequest):
     return {"status": payload.decision, "id": alert_id}
 
 
+class CorrectVotesRequest(BaseModel):
+    corp: Literal["SEN", "CAM"]
+    votes: int
+    reviewed_by: str = "dashboard"
+
+
+@router.put("/{alert_id}/correct-votes")
+async def correct_votes(alert_id: int, payload: CorrectVotesRequest):
+    """Override the validated vote count for SEN or CAM on a mesa from the review panel."""
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        "SELECT municipio_cod, zona_cod, puesto_cod, mesa FROM alerts WHERE id = ? AND alert_type = 'vote_discrepancy'",
+        (alert_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Alerta no encontrada")
+
+    r = dict(rows[0])
+    from datetime import datetime
+    now = datetime.now().isoformat()
+
+    await conn.execute("""
+        INSERT INTO manual_validations
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             action, corrected_ph_votes, validated_by, validated_at)
+        VALUES (?, ?, ?, ?, ?, 'corrected', ?, ?, ?)
+        ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+        DO UPDATE SET
+            action = 'corrected',
+            corrected_ph_votes = excluded.corrected_ph_votes,
+            validated_by = excluded.validated_by,
+            validated_at = excluded.validated_at
+    """, (r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"],
+          payload.corp, payload.votes, payload.reviewed_by, now))
+
+    await conn.commit()
+    _review_cache.clear()
+    return {"status": "ok", "corp": payload.corp, "votes": payload.votes}
+
+
 @router.put("/{alert_id}/resolve")
 async def resolve_alert(alert_id: int):
     conn = await db.get_db()
