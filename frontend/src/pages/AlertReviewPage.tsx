@@ -99,15 +99,24 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
     setError("");
     try {
       await correctAlertVotes(selectedItem.id, editingCorp, val);
-      // Update local state immediately
+      // Update local state + recalculate discrepancy
       setItems((prev) =>
         prev.map((item) => {
           if (item.id !== selectedItem.id) return item;
           const corpKey = editingCorp.toLowerCase() as "sen" | "cam";
-          return {
+          const updated = {
             ...item,
             [corpKey]: { ...item[corpKey], validated_votes: val, corrected_ph_votes: val },
           };
+          const senV = updated.sen.validated_votes;
+          const camV = updated.cam.validated_votes;
+          if (senV != null && camV != null) {
+            const gap = Math.abs(senV - camV);
+            const pct = Math.round((gap / Math.max(senV, camV, 1)) * 1000) / 10;
+            updated.vote_gap = gap;
+            updated.discrepancy_pct = pct;
+          }
+          return updated;
         })
       );
       setEditingCorp(null);

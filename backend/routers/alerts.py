@@ -109,7 +109,18 @@ async def correct_votes(alert_id: int, payload: CorrectVotesRequest):
     """, (r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"],
           payload.corp, payload.votes, payload.reviewed_by, now))
 
+    # Also update e14_results so evaluate_mesa picks up the new value
+    await conn.execute("""
+        UPDATE e14_results SET ph_total_votos = ?, status = 'corrected'
+        WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ? AND mesa = ? AND corporacion = ?
+    """, (payload.votes, r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], payload.corp))
+
     await conn.commit()
+
+    # Re-evaluate discrepancy so alerts.discrepancy_pct stays in sync
+    from backend.services import alert_engine
+    await alert_engine.evaluate_mesa(r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"])
+
     _review_cache.clear()
     return {"status": "ok", "corp": payload.corp, "votes": payload.votes}
 
