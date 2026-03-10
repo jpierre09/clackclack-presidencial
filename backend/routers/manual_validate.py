@@ -22,10 +22,16 @@ router = APIRouter(prefix="/api/validar", tags=["manual-validate"])
 _ITERATIONS = 260_000
 
 # ── Screenshot in-memory cache ────────────────────────────────────────────────
-# Key: "filepath:corp:override_repr" → PNG bytes
-# Evicts oldest entry when full (simple FIFO, good enough for this workload)
+# Key: "{mun}:{zona}:{puesto}:{mesa}:{corp}" (URL params) → PNG bytes
+# Checked BEFORE any DB query so cache hits cost ~0ms.
+# Evicts oldest entry when full (FIFO).
 _SCREENSHOT_CACHE: dict[str, bytes] = {}
 _SCREENSHOT_CACHE_MAX = 500
+
+# Dedicated thread pool for screenshot rendering — isolated from the default
+# executor used by OCR workers so renders never queue behind OCR.
+import concurrent.futures as _cf
+_SCREENSHOT_POOL = _cf.ThreadPoolExecutor(max_workers=4, thread_name_prefix="ss")
 
 
 def _safe_within(path, root) -> bool:
@@ -236,27 +242,28 @@ async def get_screenshot(mun: str, zona: str, puesto: str, mesa: int, corp: str)
     import asyncio
     from backend.services.screenshot import render_pacto_crop
 
+    # ── Cache check FIRST — zero DB queries on hit ─────────────────────────
+    url_key = f"{mun}:{zona}:{puesto}:{mesa}:{corp.upper()}"
+    png = _SCREENSHOT_CACHE.get(url_key)
+    if png is not None:
+        return Response(content=png, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=3600"})
+
+    # ── Cache miss: resolve path + render in dedicated thread pool ─────────
     full_path = await _resolve_pdf_path(mun, zona, puesto, mesa, corp)
     override = await db.get_crop_override(mun, zona, puesto, mesa, corp.upper())
 
-    cache_key = f"{full_path}:{corp}:{override}"
-    png = _SCREENSHOT_CACHE.get(cache_key)
-
-    if png is None:
-        # Run blocking PDF render in a thread pool so the event loop stays free
-        loop = asyncio.get_event_loop()
-        png = await loop.run_in_executor(
-            None, lambda: render_pacto_crop(str(full_path), corp, override=override)
-        )
-        if len(_SCREENSHOT_CACHE) >= _SCREENSHOT_CACHE_MAX:
-            _SCREENSHOT_CACHE.pop(next(iter(_SCREENSHOT_CACHE)))
-        _SCREENSHOT_CACHE[cache_key] = png
-
-    return Response(
-        content=png,
-        media_type="image/png",
-        headers={"Cache-Control": "public, max-age=3600"},
+    loop = asyncio.get_event_loop()
+    png = await loop.run_in_executor(
+        _SCREENSHOT_POOL,
+        lambda: render_pacto_crop(str(full_path), corp, override=override)
     )
+    if len(_SCREENSHOT_CACHE) >= _SCREENSHOT_CACHE_MAX:
+        _SCREENSHOT_CACHE.pop(next(iter(_SCREENSHOT_CACHE)))
+    _SCREENSHOT_CACHE[url_key] = png
+
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.get("/fullpage/{mun}/{zona}/{puesto}/{mesa}/{corp}")

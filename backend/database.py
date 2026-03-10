@@ -236,6 +236,12 @@ CREATE INDEX IF NOT EXISTS idx_validations_location
 
 CREATE INDEX IF NOT EXISTS idx_validations_action
     ON manual_validations(action);
+
+CREATE INDEX IF NOT EXISTS idx_results_processed_at
+    ON e14_results(processed_at DESC) WHERE status IN ('processed','corrected');
+
+CREATE INDEX IF NOT EXISTS idx_queue_claims_corp
+    ON queue_claims(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
 """
 
 
