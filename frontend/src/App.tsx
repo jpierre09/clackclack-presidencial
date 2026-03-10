@@ -10,6 +10,7 @@ import { MapPage } from "./pages/MapPage";
 import { NovedadesPage } from "./pages/NovedadesPage";
 import { ProgressPage } from "./pages/ProgressPage";
 import { ResultsPage } from "./pages/ResultsPage";
+import { AlertReviewPage } from "./pages/AlertReviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import type {
   AlertItem,
@@ -19,7 +20,7 @@ import type {
   MunicipioNode,
 } from "./types";
 
-type PageId = "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings";
+type PageId = "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "settings";
 
 export function App() {
   const [activePage, setActivePage] = useState<PageId>("dashboard");
@@ -104,6 +105,12 @@ export function App() {
             hierarchy={hierarchy}
             selectedMunicipio={selectedMunicipio}
             onOpenValidation={() => {}}
+          />
+        )}
+        {activePage === "review" && (
+          <AlertReviewPage
+            selectedMunicipio={selectedMunicipio}
+            onRefresh={refreshData}
           />
         )}
         {activePage === "results" && <ResultsPage data={camaraLive} />}

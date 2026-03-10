@@ -1,4 +1,5 @@
 export type Severity = "danger" | "warning" | "info";
+export type AlertReviewDecision = "real_alert" | "false_alert";
 
 export interface DashboardSummary {
   total_mesas: number;
@@ -93,7 +94,48 @@ export interface AlertItem {
   description: string;
   discrepancy_pct: number | null;
   is_resolved: 0 | 1;
+  review_decision?: AlertReviewDecision | null;
+  reviewed_at?: string | null;
+  reviewed_by?: string | null;
   created_at: string;
+}
+
+export interface AlertReviewCorpItem {
+  corp: "SEN" | "CAM";
+  validated_votes: number | null;
+  ai_votes: number | null;
+  votos_urna: number | null;
+  ocr_confidence: number | null;
+  result_status: string | null;
+  validation_action: string | null;
+  validated_by: string | null;
+  validated_at: string | null;
+  corrected_ph_votes: number | null;
+  screenshot_path: string;
+}
+
+export interface AlertReviewItem {
+  id: number;
+  municipio_cod: string;
+  zona_cod: string;
+  puesto_cod: string;
+  mesa: number;
+  municipio: string | null;
+  puesto_nombre: string | null;
+  alert_type: string;
+  severity: Severity;
+  description: string;
+  discrepancy_pct: number | null;
+  vote_gap: number | null;
+  is_resolved: 0 | 1;
+  created_at: string;
+  review_decision: AlertReviewDecision | null;
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  sen: AlertReviewCorpItem;
+  cam: AlertReviewCorpItem;
 }
 
 export interface MapItem {

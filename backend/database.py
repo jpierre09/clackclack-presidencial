@@ -242,6 +242,9 @@ CREATE INDEX IF NOT EXISTS idx_results_processed_at
 
 CREATE INDEX IF NOT EXISTS idx_queue_claims_corp
     ON queue_claims(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_alerts_review_order
+    ON alerts(alert_type, is_resolved, review_decision, created_at DESC);
 """
 
 
@@ -904,7 +907,10 @@ def _build_alert_review_item(row: dict) -> dict:
 
 
 async def get_alert_review_items(
-    municipio_cod: str | None = None, reviewed: bool = False
+    municipio_cod: str | None = None,
+    reviewed: bool = False,
+    limit: int = 200,
+    offset: int = 0,
 ) -> list[dict]:
     db = await get_db()
     query = """
@@ -984,11 +990,8 @@ async def get_alert_review_items(
     if municipio_cod:
         query += " AND a.municipio_cod = ?"
         params.append(municipio_cod)
-    query += """
-        ORDER BY
-            CASE WHEN a.reviewed_at IS NULL THEN a.created_at ELSE a.reviewed_at END DESC,
-            COALESCE(a.discrepancy_pct, 0) DESC
-    """
+    query += " ORDER BY a.created_at DESC, COALESCE(a.discrepancy_pct, 0) DESC LIMIT ? OFFSET ?"
+    params.extend([limit, offset])
     rows = await db.execute_fetchall(query, params)
     return [_build_alert_review_item(dict(row)) for row in rows]
 

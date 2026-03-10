@@ -15,4 +15,14 @@ e14_downloads/
 clackclack.db
 clackclack.db-shm
 clackclack.db-wal
+clackclack_backup_*.db
 *.log
+frontend/tsconfig.tsbuildinfo
+test_*.py
+test_*.pdf
+analyze_alerts.py
+generate_reclamaciones.py
+generate_reclamaciones_docx.py
+sftp_process.py
+sftp_process.log
+Usuarios asignados.xlsx

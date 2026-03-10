@@ -3,9 +3,18 @@ results/
 *.db
 *.db-wal
 *.db-shm
-*.xlsx
+clackclack_backup_*.db
 __pycache__/
 *.pyc
 backend/.venv/
 frontend/node_modules/
 .claude/
+frontend/tsconfig.tsbuildinfo
+test_*.py
+test_*.pdf
+analyze_alerts.py
+generate_reclamaciones.py
+generate_reclamaciones_docx.py
+sftp_process.py
+sftp_process.log
+Usuarios asignados.xlsx

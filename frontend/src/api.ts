@@ -1,5 +1,7 @@
 import type {
   AlertItem,
+  AlertReviewDecision,
+  AlertReviewItem,
   CamaraLiveResponse,
   DashboardSummary,
   MapItem,
@@ -51,6 +53,28 @@ export async function getCamaraLive(): Promise<CamaraLiveResponse> {
 
 export async function getAlerts(resolved = false): Promise<AlertItem[]> {
   return fetchJson<AlertItem[]>(`/api/alerts?resolved=${resolved}`);
+}
+
+export async function getAlertReviewItems(
+  reviewed = false,
+  municipio?: string,
+  limit = 200,
+  offset = 0,
+): Promise<AlertReviewItem[]> {
+  const params = new URLSearchParams({ reviewed: String(reviewed), limit: String(limit), offset: String(offset) });
+  if (municipio) params.set("municipio", municipio);
+  return fetchJson<AlertReviewItem[]>(`/api/alerts/review-items?${params}`);
+}
+
+export async function reviewAlert(
+  alertId: number,
+  decision: AlertReviewDecision,
+  reviewedBy = "dashboard"
+): Promise<void> {
+  await fetchJson(`/api/alerts/${alertId}/review`, {
+    method: "PUT",
+    body: JSON.stringify({ decision, reviewed_by: reviewedBy }),
+  });
 }
 
 export async function resolveAlert(alertId: number): Promise<void> {

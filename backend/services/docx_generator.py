@@ -72,8 +72,15 @@ def generate_single(alert_data: dict, comision: dict | None,
     date_str = f"{today.day} {months_es[today.month]} de {today.year}"
 
     # Use the visible auxiliary number from "Nombre Comisión" when available.
-    comision_num = _get_auxiliar_display_number(comision)
-    comision_text = f"Auxiliar   N\u00ba {comision_num}"
+    # If no commission data, use "Comisión Municipal" instead.
+    if comision:
+        comision_num = _get_auxiliar_display_number(comision)
+        comision_replacement = str(comision_num)   # replaces "120" in template
+        comision_full_replace = False
+    else:
+        comision_num = None
+        comision_replacement = None
+        comision_full_replace = True   # replace entire "Auxiliar   Nº 120" line
 
     # Name and CC
     name_text = user_name if user_name else "________________________"
@@ -104,7 +111,10 @@ def generate_single(alert_data: dict, comision: dict | None,
 
         # Commission number (P6)
         if "Auxiliar" in text and "120" in text:
-            _replace_in_paragraph(para, "120", str(comision_num))
+            if comision_full_replace:
+                _replace_in_paragraph(para, para.text.strip(), "Comisi\u00f3n Municipal")
+            else:
+                _replace_in_paragraph(para, "120", comision_replacement)
 
         # Name and CC (P12)
         if "David Esteban" in text or "lvarez Ortiz" in text:
@@ -117,6 +127,15 @@ def generate_single(alert_data: dict, comision: dict | None,
         # Location data (P16)
         if "Municipio, Zona, Puesto, Mesa" in text:
             _replace_in_paragraph(para, para.text.strip(), location_text)
+
+    # Set the "X" marker in the causales table to font size 22
+    from docx.shared import Pt
+    if doc.tables:
+        x_cell = doc.tables[0].rows[1].cells[1]
+        for para in x_cell.paragraphs:
+            for run in para.runs:
+                if run.text.strip():
+                    run.font.size = Pt(22)
 
     buffer = io.BytesIO()
     doc.save(buffer)

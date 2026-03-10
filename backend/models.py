@@ -66,6 +66,11 @@ class Alert(BaseModel):
     cam_ph_votes: Optional[int] = None
     discrepancy_pct: Optional[float] = None
     is_resolved: bool = False
+    review_decision: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    resolved_by: Optional[str] = None
+    resolved_at: Optional[str] = None
     created_at: str
 
 

@@ -1,14 +1,15 @@
 interface TopBarProps {
   activePage: string;
-  onSelect: (page: "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings") => void;
+  onSelect: (page: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "settings") => void;
   novedadesCount?: number;
 }
 
 const pages: Array<{
-  id: "dashboard" | "results" | "map" | "novedades" | "progreso" | "settings";
+  id: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "settings";
   label: string;
 }> = [
   { id: "dashboard", label: "Dashboard" },
+  { id: "review", label: "Revision" },
   { id: "results", label: "Resultados" },
   { id: "map", label: "Mapa" },
   { id: "novedades", label: "Novedades" },
