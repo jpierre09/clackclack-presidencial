@@ -93,6 +93,42 @@ async def recent_real_alerts(limit: int = 10):
     return [dict(r) for r in rows]
 
 
+class MarkNoveltyRequest(BaseModel):
+    corp: Literal["SEN", "CAM", "BOTH"]
+    note: str
+    reviewed_by: str = "dashboard"
+
+
+@router.put("/{alert_id}/mark-novelty")
+async def mark_novelty(alert_id: int, payload: MarkNoveltyRequest):
+    """Mark SEN, CAM or both as novelty (blue) from the review panel."""
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        "SELECT municipio_cod, zona_cod, puesto_cod, mesa FROM alerts WHERE id = ?", (alert_id,)
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Alerta no encontrada")
+    r = dict(rows[0])
+    from datetime import datetime
+    now = datetime.now().isoformat()
+    corps = ["SEN", "CAM"] if payload.corp == "BOTH" else [payload.corp]
+    for corp in corps:
+        await conn.execute("""
+            INSERT INTO manual_validations
+                (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+                 action, corrected_ph_votes, novelty_note, validated_by, validated_at)
+            VALUES (?, ?, ?, ?, ?, 'novelty', NULL, ?, ?, ?)
+            ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+            DO UPDATE SET action='novelty', corrected_ph_votes=NULL,
+                novelty_note=excluded.novelty_note,
+                validated_by=excluded.validated_by, validated_at=excluded.validated_at
+        """, (r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], corp,
+              payload.note, payload.reviewed_by, now))
+    await conn.commit()
+    _review_cache.clear()
+    return {"status": "ok", "corps": corps, "note": payload.note}
+
+
 @router.put("/{alert_id}/undo-review")
 async def undo_review(alert_id: int):
     """Revert a review decision back to pending (review_decision = NULL)."""
