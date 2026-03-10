@@ -49,6 +49,7 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
   const editRef = useRef<HTMLInputElement>(null);
   const [error, setError] = useState("");
 
+  // Full load: shows spinner, resets selection. Used only on tab/municipio change.
   const load = async () => {
     setLoading(true);
     setError("");
@@ -58,9 +59,7 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
       setOffset(nextItems.length);
       setHasMore(nextItems.length === PAGE_SIZE);
       setSelectedId((current) => {
-        if (current && nextItems.some((item) => item.id === current)) {
-          return current;
-        }
+        if (current && nextItems.some((item) => item.id === current)) return current;
         return nextItems[0]?.id ?? null;
       });
       // Warm server + browser cache for first 3 items on load
@@ -74,6 +73,24 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
       setError(err instanceof Error ? err.message : "No fue posible cargar las alertas.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Silent refresh: updates the list in background without any loading state or view jump.
+  // Used after decisions so new alerts appear without disrupting the current view.
+  const silentRefresh = async () => {
+    try {
+      const nextItems = await getAlertReviewItems(reviewed, selectedMunicipio || undefined, PAGE_SIZE, 0);
+      setItems(nextItems);
+      setOffset(nextItems.length);
+      setHasMore(nextItems.length === PAGE_SIZE);
+      // Keep current selection if it still exists; otherwise don't change it
+      setSelectedId((current) => {
+        if (current && nextItems.some((item) => item.id === current)) return current;
+        return current; // leave unchanged — user can pick manually
+      });
+    } catch {
+      // Ignore background refresh errors — not visible to user
     }
   };
 
@@ -173,8 +190,8 @@ export function AlertReviewPage({ selectedMunicipio, onRefresh }: AlertReviewPag
 
     try {
       await reviewAlert(selectedItem.id, decision);
-      // Refresh in background — don't await, UI is already updated
-      void load();
+      // Silent background refresh — no spinner, no view jump
+      void silentRefresh();
       void onRefresh();
     } catch (err) {
       // Revert on failure
