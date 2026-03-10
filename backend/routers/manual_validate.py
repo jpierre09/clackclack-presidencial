@@ -21,6 +21,12 @@ router = APIRouter(prefix="/api/validar", tags=["manual-validate"])
 
 _ITERATIONS = 260_000
 
+# ── Screenshot in-memory cache ────────────────────────────────────────────────
+# Key: "filepath:corp:override_repr" → PNG bytes
+# Evicts oldest entry when full (simple FIFO, good enough for this workload)
+_SCREENSHOT_CACHE: dict[str, bytes] = {}
+_SCREENSHOT_CACHE_MAX = 500
+
 
 def _safe_within(path, root) -> bool:
     try:
@@ -63,6 +69,11 @@ class CreateUserRequest(BaseModel):
     username: str
     password: str
     setup_token: str
+
+
+class AdminUsersRequest(BaseModel):
+    admin_token: str
+    usernames: list[str] | None = None
 
 
 class SubmitRequest(BaseModel):
@@ -180,9 +191,9 @@ async def create_user(req: CreateUserRequest):
 
 @router.get("/queue/next")
 async def get_next(username: str = Depends(_require_auth)):
-    item = await db.get_next_unvalidated(username)
+    item, prefetch_url = await db.get_next_unvalidated(username)
     stats = await db.get_validation_stats()
-    return {"item": item, "stats": stats}
+    return {"item": item, "stats": stats, "prefetch_url": prefetch_url}
 
 
 @router.get("/queue/stats")
@@ -222,12 +233,29 @@ async def _resolve_pdf_path(mun: str, zona: str, puesto: str, mesa: int, corp: s
 
 @router.get("/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}")
 async def get_screenshot(mun: str, zona: str, puesto: str, mesa: int, corp: str):
+    import asyncio
     from backend.services.screenshot import render_pacto_crop
+
     full_path = await _resolve_pdf_path(mun, zona, puesto, mesa, corp)
     override = await db.get_crop_override(mun, zona, puesto, mesa, corp.upper())
+
+    cache_key = f"{full_path}:{corp}:{override}"
+    png = _SCREENSHOT_CACHE.get(cache_key)
+
+    if png is None:
+        # Run blocking PDF render in a thread pool so the event loop stays free
+        loop = asyncio.get_event_loop()
+        png = await loop.run_in_executor(
+            None, lambda: render_pacto_crop(str(full_path), corp, override=override)
+        )
+        if len(_SCREENSHOT_CACHE) >= _SCREENSHOT_CACHE_MAX:
+            _SCREENSHOT_CACHE.pop(next(iter(_SCREENSHOT_CACHE)))
+        _SCREENSHOT_CACHE[cache_key] = png
+
     return Response(
-        content=render_pacto_crop(str(full_path), corp, override=override),
+        content=png,
         media_type="image/png",
+        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
@@ -334,10 +362,24 @@ async def get_progress():
 @router.get("/admin/users")
 async def list_users(admin_token: str = ""):
     if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
-        raise HTTPException(status_code=403, detail="Token inválido")
-    conn = await db.get_db()
-    rows = await conn.execute_fetchall("SELECT id, username, is_active FROM users ORDER BY id")
-    return [dict(r) for r in rows]
+        raise HTTPException(status_code=403, detail="Token invalido")
+    return await db.list_users()
+
+
+@router.post("/admin/users/deactivate")
+async def deactivate_validation_users(req: AdminUsersRequest):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token invalido")
+    result = await db.deactivate_users(req.usernames)
+    return {"status": "ok", **result}
+
+
+@router.delete("/admin/users")
+async def delete_validation_users(req: AdminUsersRequest):
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token invalido")
+    result = await db.delete_users(req.usernames)
+    return {"status": "ok", **result}
 
 
 @router.delete("/admin/sessions")

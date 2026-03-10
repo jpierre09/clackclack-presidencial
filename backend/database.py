@@ -43,6 +43,9 @@ async def init_db():
 _MIGRATIONS = [
     "ALTER TABLE manual_validations ADD COLUMN resolved_at TEXT",
     "ALTER TABLE manual_validations ADD COLUMN resolved_by TEXT",
+    "ALTER TABLE alerts ADD COLUMN review_decision TEXT",
+    "ALTER TABLE alerts ADD COLUMN reviewed_at TEXT",
+    "ALTER TABLE alerts ADD COLUMN reviewed_by TEXT",
 ]
 
 
@@ -141,6 +144,9 @@ CREATE TABLE IF NOT EXISTS alerts (
     is_resolved INTEGER DEFAULT 0,
     resolved_by TEXT,
     resolved_at TEXT,
+    review_decision TEXT,
+    reviewed_at TEXT,
+    reviewed_by TEXT,
     created_at TEXT NOT NULL,
     UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, alert_type)
 );
@@ -583,8 +589,9 @@ async def upsert_alert(data: dict) -> int:
         """INSERT INTO alerts
         (municipio_cod, zona_cod, puesto_cod, mesa, alert_type,
          severity, description, sen_ph_votes, cam_ph_votes,
-         discrepancy_pct, is_resolved, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+         discrepancy_pct, is_resolved, review_decision,
+         reviewed_at, reviewed_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
         ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, alert_type)
         DO UPDATE SET
             severity = excluded.severity,
@@ -592,9 +599,51 @@ async def upsert_alert(data: dict) -> int:
             sen_ph_votes = excluded.sen_ph_votes,
             cam_ph_votes = excluded.cam_ph_votes,
             discrepancy_pct = excluded.discrepancy_pct,
-            is_resolved = 0,
-            resolved_by = NULL,
-            resolved_at = NULL,
+            is_resolved = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                 AND alerts.review_decision = 'false_alert'
+                THEN 1
+                ELSE 0
+            END,
+            resolved_by = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                 AND alerts.review_decision = 'false_alert'
+                THEN alerts.resolved_by
+                ELSE NULL
+            END,
+            resolved_at = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                 AND alerts.review_decision = 'false_alert'
+                THEN alerts.resolved_at
+                ELSE NULL
+            END,
+            review_decision = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                THEN alerts.review_decision
+                ELSE NULL
+            END,
+            reviewed_at = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                THEN alerts.reviewed_at
+                ELSE NULL
+            END,
+            reviewed_by = CASE
+                WHEN alerts.sen_ph_votes IS excluded.sen_ph_votes
+                 AND alerts.cam_ph_votes IS excluded.cam_ph_votes
+                 AND alerts.discrepancy_pct IS excluded.discrepancy_pct
+                THEN alerts.reviewed_by
+                ELSE NULL
+            END,
             created_at = excluded.created_at""",
         (
             data["municipio_cod"],
@@ -607,6 +656,9 @@ async def upsert_alert(data: dict) -> int:
             data.get("sen_ph_votes"),
             data.get("cam_ph_votes"),
             data.get("discrepancy_pct"),
+            None,
+            None,
+            None,
             data["created_at"],
         ),
     )
@@ -791,6 +843,184 @@ async def get_alerts(municipio_cod: str = None, resolved: bool = False) -> list[
     query += " ORDER BY a.created_at DESC"
     rows = await db.execute_fetchall(query, params)
     return [dict(r) for r in rows]
+
+
+def _build_alert_review_item(row: dict) -> dict:
+    mun = row["municipio_cod"]
+    zona = row["zona_cod"]
+    puesto = row["puesto_cod"]
+    mesa = row["mesa"]
+
+    def build_corp(prefix: str, corp: str) -> dict:
+        return {
+            "corp": corp,
+            "validated_votes": row[f"{prefix}_validated_votes"],
+            "ai_votes": row[f"{prefix}_ai_votes"],
+            "votos_urna": row[f"{prefix}_votos_urna"],
+            "ocr_confidence": row[f"{prefix}_ocr_confidence"],
+            "result_status": row[f"{prefix}_result_status"],
+            "validation_action": row[f"{prefix}_validation_action"],
+            "validated_by": row[f"{prefix}_validated_by"],
+            "validated_at": row[f"{prefix}_validated_at"],
+            "corrected_ph_votes": row[f"{prefix}_corrected_ph_votes"],
+            "screenshot_path": f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}",
+        }
+
+    sen_votes = row["sen_validated_votes"]
+    cam_votes = row["cam_validated_votes"]
+    vote_gap = None
+    if sen_votes is not None and cam_votes is not None:
+        vote_gap = abs(sen_votes - cam_votes)
+
+    return {
+        "id": row["id"],
+        "municipio_cod": mun,
+        "zona_cod": zona,
+        "puesto_cod": puesto,
+        "mesa": mesa,
+        "municipio": row["municipio"],
+        "puesto_nombre": row["puesto_nombre"],
+        "alert_type": row["alert_type"],
+        "severity": row["severity"],
+        "description": row["description"],
+        "discrepancy_pct": row["discrepancy_pct"],
+        "vote_gap": vote_gap,
+        "is_resolved": row["is_resolved"],
+        "created_at": row["created_at"],
+        "review_decision": row["review_decision"],
+        "reviewed_at": row["reviewed_at"],
+        "reviewed_by": row["reviewed_by"],
+        "resolved_at": row["resolved_at"],
+        "resolved_by": row["resolved_by"],
+        "sen": build_corp("sen", "SEN"),
+        "cam": build_corp("cam", "CAM"),
+    }
+
+
+async def get_alert_review_items(
+    municipio_cod: str | None = None, reviewed: bool = False
+) -> list[dict]:
+    db = await get_db()
+    query = """
+        SELECT
+            a.id,
+            a.municipio_cod,
+            a.zona_cod,
+            a.puesto_cod,
+            a.mesa,
+            a.alert_type,
+            a.severity,
+            a.description,
+            a.discrepancy_pct,
+            a.is_resolved,
+            a.created_at,
+            a.review_decision,
+            a.reviewed_at,
+            a.reviewed_by,
+            a.resolved_at,
+            a.resolved_by,
+            p.municipio,
+            p.nombre AS puesto_nombre,
+            COALESCE(a.sen_ph_votes, sen_mv.corrected_ph_votes, sen_r.ph_total_votos) AS sen_validated_votes,
+            sen_r.ph_total_votos AS sen_ai_votes,
+            sen_r.votos_urna AS sen_votos_urna,
+            sen_r.ocr_confidence AS sen_ocr_confidence,
+            sen_r.status AS sen_result_status,
+            sen_mv.action AS sen_validation_action,
+            sen_mv.validated_by AS sen_validated_by,
+            sen_mv.validated_at AS sen_validated_at,
+            sen_mv.corrected_ph_votes AS sen_corrected_ph_votes,
+            COALESCE(a.cam_ph_votes, cam_mv.corrected_ph_votes, cam_r.ph_total_votos) AS cam_validated_votes,
+            cam_r.ph_total_votos AS cam_ai_votes,
+            cam_r.votos_urna AS cam_votos_urna,
+            cam_r.ocr_confidence AS cam_ocr_confidence,
+            cam_r.status AS cam_result_status,
+            cam_mv.action AS cam_validation_action,
+            cam_mv.validated_by AS cam_validated_by,
+            cam_mv.validated_at AS cam_validated_at,
+            cam_mv.corrected_ph_votes AS cam_corrected_ph_votes
+        FROM alerts a
+        LEFT JOIN puestos p
+            ON p.municipio_cod = a.municipio_cod
+            AND p.zona_cod = a.zona_cod
+            AND p.puesto_cod = a.puesto_cod
+        LEFT JOIN e14_results sen_r
+            ON sen_r.municipio_cod = a.municipio_cod
+            AND sen_r.zona_cod = a.zona_cod
+            AND sen_r.puesto_cod = a.puesto_cod
+            AND sen_r.mesa = a.mesa
+            AND sen_r.corporacion = 'SEN'
+        LEFT JOIN manual_validations sen_mv
+            ON sen_mv.municipio_cod = a.municipio_cod
+            AND sen_mv.zona_cod = a.zona_cod
+            AND sen_mv.puesto_cod = a.puesto_cod
+            AND sen_mv.mesa = a.mesa
+            AND sen_mv.corporacion = 'SEN'
+        LEFT JOIN e14_results cam_r
+            ON cam_r.municipio_cod = a.municipio_cod
+            AND cam_r.zona_cod = a.zona_cod
+            AND cam_r.puesto_cod = a.puesto_cod
+            AND cam_r.mesa = a.mesa
+            AND cam_r.corporacion = 'CAM'
+        LEFT JOIN manual_validations cam_mv
+            ON cam_mv.municipio_cod = a.municipio_cod
+            AND cam_mv.zona_cod = a.zona_cod
+            AND cam_mv.puesto_cod = a.puesto_cod
+            AND cam_mv.mesa = a.mesa
+            AND cam_mv.corporacion = 'CAM'
+        WHERE a.alert_type = 'vote_discrepancy'
+    """
+    params: list[str] = []
+    if reviewed:
+        query += " AND a.review_decision IS NOT NULL"
+    else:
+        query += " AND a.is_resolved = 0 AND a.review_decision IS NULL"
+    if municipio_cod:
+        query += " AND a.municipio_cod = ?"
+        params.append(municipio_cod)
+    query += """
+        ORDER BY
+            CASE WHEN a.reviewed_at IS NULL THEN a.created_at ELSE a.reviewed_at END DESC,
+            COALESCE(a.discrepancy_pct, 0) DESC
+    """
+    rows = await db.execute_fetchall(query, params)
+    return [_build_alert_review_item(dict(row)) for row in rows]
+
+
+async def review_alert(alert_id: int, decision: str, reviewed_by: str = "dashboard") -> bool:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        "SELECT id FROM alerts WHERE id = ? AND alert_type = 'vote_discrepancy'",
+        (alert_id,),
+    )
+    if not rows:
+        return False
+
+    now = datetime.now().isoformat()
+    is_false_alert = decision == "false_alert"
+    await db.execute(
+        """
+        UPDATE alerts
+        SET review_decision = ?,
+            reviewed_at = ?,
+            reviewed_by = ?,
+            is_resolved = ?,
+            resolved_at = ?,
+            resolved_by = ?
+        WHERE id = ?
+        """,
+        (
+            decision,
+            now,
+            reviewed_by,
+            1 if is_false_alert else 0,
+            now if is_false_alert else None,
+            reviewed_by if is_false_alert else None,
+            alert_id,
+        ),
+    )
+    await db.commit()
+    return True
 
 
 async def get_mesa_detail(mun: str, zona: str, puesto: str, mesa: int) -> dict:
@@ -1163,6 +1393,24 @@ async def set_setting(key: str, value: str):
 
 # --- Auth / User management ---
 
+def _normalize_usernames(usernames: list[str] | None) -> list[str]:
+    return sorted({username.strip() for username in (usernames or []) if username and username.strip()})
+
+
+def _user_scope(column: str, usernames: list[str] | None) -> tuple[str, tuple[str, ...]]:
+    names = tuple(_normalize_usernames(usernames))
+    if not names:
+        return "", ()
+    placeholders = ", ".join("?" for _ in names)
+    return f"WHERE {column} IN ({placeholders})", names
+
+
+async def list_users() -> list[dict]:
+    db = await get_db()
+    rows = await db.execute_fetchall("SELECT id, username, is_active FROM users ORDER BY id")
+    return [dict(row) for row in rows]
+
+
 async def create_user(username: str, password_hash: str) -> bool:
     db = await get_db()
     try:
@@ -1183,6 +1431,56 @@ async def get_user(username: str) -> dict | None:
         (username,),
     )
     return dict(rows[0]) if rows else None
+
+
+async def deactivate_users(usernames: list[str] | None = None) -> dict:
+    db = await get_db()
+    user_where, user_params = _user_scope("username", usernames)
+    session_where, session_params = _user_scope("username", usernames)
+    claim_where, claim_params = _user_scope("claimed_by", usernames)
+
+    users = await db.execute_fetchall(f"SELECT username FROM users {user_where}", user_params)
+    sessions = await db.execute_fetchall(f"SELECT token FROM sessions {session_where}", session_params)
+    claims = await db.execute_fetchall(f"SELECT claimed_by FROM queue_claims {claim_where}", claim_params)
+
+    if users:
+        await db.execute(f"UPDATE users SET is_active = 0 {user_where}", user_params)
+    if sessions:
+        await db.execute(f"DELETE FROM sessions {session_where}", session_params)
+    if claims:
+        await db.execute(f"DELETE FROM queue_claims {claim_where}", claim_params)
+    await db.commit()
+
+    return {
+        "users": len(users),
+        "sessions": len(sessions),
+        "claims": len(claims),
+    }
+
+
+async def delete_users(usernames: list[str] | None = None) -> dict:
+    db = await get_db()
+    user_where, user_params = _user_scope("username", usernames)
+    session_where, session_params = _user_scope("username", usernames)
+    claim_where, claim_params = _user_scope("claimed_by", usernames)
+
+    users = await db.execute_fetchall(f"SELECT username FROM users {user_where}", user_params)
+    sessions = await db.execute_fetchall(f"SELECT token FROM sessions {session_where}", session_params)
+    claims = await db.execute_fetchall(f"SELECT claimed_by FROM queue_claims {claim_where}", claim_params)
+
+    if sessions:
+        await db.execute(f"DELETE FROM sessions {session_where}", session_params)
+    if claims:
+        await db.execute(f"DELETE FROM queue_claims {claim_where}", claim_params)
+    if users:
+        await db.execute(f"DELETE FROM users {user_where}", user_params)
+    await db.commit()
+
+    return {
+        "users": len(users),
+        "sessions": len(sessions),
+        "claims": len(claims),
+    }
 
 
 async def create_session(token: str, username: str):
@@ -1211,8 +1509,40 @@ async def delete_session(token: str):
 
 # --- Manual validations ---
 
-async def get_next_unvalidated(username: str) -> dict | None:
-    """Return the item claimed by this user, or claim the next available one."""
+_UNCLAIMED_QUEUE_SQL = """
+    SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
+           r.corporacion, r.ph_total_votos, r.ph_votos_lista,
+           r.votos_urna, r.ocr_confidence, r.processed_at,
+           d.filepath,
+           p.municipio, p.nombre as puesto_nombre
+    FROM e14_results r
+    JOIN e14_downloads d ON d.id = r.download_id
+    LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
+        AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+    LEFT JOIN manual_validations mv
+        ON mv.municipio_cod = r.municipio_cod
+        AND mv.zona_cod = r.zona_cod
+        AND mv.puesto_cod = r.puesto_cod
+        AND mv.mesa = r.mesa
+        AND mv.corporacion = r.corporacion
+    LEFT JOIN queue_claims qc
+        ON qc.municipio_cod = r.municipio_cod
+        AND qc.zona_cod = r.zona_cod
+        AND qc.puesto_cod = r.puesto_cod
+        AND qc.mesa = r.mesa
+        AND qc.corporacion = r.corporacion
+    WHERE r.status IN ('processed', 'corrected')
+      AND mv.id IS NULL
+      AND qc.claimed_by IS NULL
+    ORDER BY r.processed_at DESC
+    LIMIT 2
+"""
+
+
+async def get_next_unvalidated(username: str) -> tuple[dict | None, str | None]:
+    """Return (item, prefetch_url) where prefetch_url is the screenshot URL
+    of the item after next (for client-side preloading).
+    """
     db = await get_db()
 
     # 1. Return existing claim for this user if any
@@ -1244,46 +1574,31 @@ async def get_next_unvalidated(username: str) -> dict | None:
             r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
         )
         r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
-        return r
+        # Peek at next unclaimed item for prefetch
+        peek = await db.execute_fetchall(_UNCLAIMED_QUEUE_SQL)
+        prefetch_url = None
+        if peek:
+            p2 = dict(peek[0])
+            prefetch_url = (f"/api/validar/screenshot/{p2['municipio_cod']}/{p2['zona_cod']}"
+                            f"/{p2['puesto_cod']}/{p2['mesa']}/{p2['corporacion']}")
+        return r, prefetch_url
 
-    # 2. Find next unclaimed, unvalidated item
-    rows = await db.execute_fetchall(
-        """
-        SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
-               r.corporacion, r.ph_total_votos, r.ph_votos_lista,
-               r.votos_urna, r.ocr_confidence, r.processed_at,
-               d.filepath,
-               p.municipio, p.nombre as puesto_nombre
-        FROM e14_results r
-        JOIN e14_downloads d ON d.id = r.download_id
-        LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
-            AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
-        LEFT JOIN manual_validations mv
-            ON mv.municipio_cod = r.municipio_cod
-            AND mv.zona_cod = r.zona_cod
-            AND mv.puesto_cod = r.puesto_cod
-            AND mv.mesa = r.mesa
-            AND mv.corporacion = r.corporacion
-        LEFT JOIN queue_claims qc
-            ON qc.municipio_cod = r.municipio_cod
-            AND qc.zona_cod = r.zona_cod
-            AND qc.puesto_cod = r.puesto_cod
-            AND qc.mesa = r.mesa
-            AND qc.corporacion = r.corporacion
-        WHERE r.status IN ('processed', 'corrected')
-          AND mv.id IS NULL
-          AND qc.claimed_by IS NULL
-        ORDER BY r.processed_at DESC
-        LIMIT 1
-        """
-    )
+    # 2. Find next two unclaimed, unvalidated items (first is claimed, second is prefetch)
+    rows = await db.execute_fetchall(_UNCLAIMED_QUEUE_SQL)
     if not rows:
-        return None
+        return None, None
 
     r = dict(rows[0])
     mun, zona, puesto, mesa, corp = (
         r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
     )
+
+    # Prefetch URL = second row if available
+    prefetch_url = None
+    if len(rows) > 1:
+        p2 = dict(rows[1])
+        prefetch_url = (f"/api/validar/screenshot/{p2['municipio_cod']}/{p2['zona_cod']}"
+                        f"/{p2['puesto_cod']}/{p2['mesa']}/{p2['corporacion']}")
 
     # 3. Claim it for this user
     await db.execute(
@@ -1304,7 +1619,7 @@ async def get_next_unvalidated(username: str) -> dict | None:
     await db.commit()
 
     r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
-    return r
+    return r, prefetch_url
 
 
 async def release_claim(username: str):

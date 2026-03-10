@@ -45,7 +45,6 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
   const [noveltyText, setNoveltyText] = useState("");
   const [canUndo, setCanUndo] = useState(false);
 
-  const [imgKey, setImgKey] = useState(0);
   const editRef = useRef<HTMLInputElement>(null);
   const noveltyRef = useRef<HTMLTextAreaElement>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -63,7 +62,11 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
       const data = await res.json();
       setItem(data.item);
       setStats(data.stats);
-      setImgKey((k) => k + 1);
+      // Prefetch next item's screenshot so it's in browser cache when needed
+      if (data.prefetch_url) {
+        const img = new Image();
+        img.src = data.prefetch_url;
+      }
     } finally {
       setLoading(false);
     }
@@ -81,7 +84,6 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
       setItem(data.item);
       setStats(data.stats);
       setCanUndo(false);
-      setImgKey((k) => k + 1);
     } finally {
       setLoading(false);
     }
@@ -250,12 +252,12 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
                 </div>
               </div>
 
-              {/* PDF crop */}
+              {/* PDF crop — stable URL so browser caches it (helps undo) */}
               <div className="tinder-img-wrap">
                 <img
-                  key={imgKey}
-                  src={`${item.screenshot_url}?t=${imgKey}`}
-                  alt="Área votos Pacto Histórico"
+                  key={`${item.municipio_cod}-${item.zona_cod}-${item.puesto_cod}-${item.mesa}-${item.corporacion}`}
+                  src={item.screenshot_url}
+                  alt="Area votos Pacto Historico"
                   className="tinder-img"
                 />
               </div>
