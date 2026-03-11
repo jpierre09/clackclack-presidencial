@@ -649,6 +649,28 @@ async def get_missing_mesas(admin_token: str = "", limit: int = 10):
     return [dict(r) for r in rows]
 
 
+@router.get("/admin/resultados-export")
+async def export_resultados(admin_token: str = ""):
+    """Admin: export all e14_results (full vote report) as JSON."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall("""
+        SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion,
+               COALESCE(mv.corrected_ph_votes, r.ph_total_votos) AS ph_total_votos,
+               r.votos_urna, r.ocr_confidence, r.status,
+               p.municipio, p.nombre AS puesto_nombre, p.departamento
+        FROM e14_results r
+        LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
+            AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+        LEFT JOIN manual_validations mv ON mv.municipio_cod = r.municipio_cod
+            AND mv.zona_cod = r.zona_cod AND mv.puesto_cod = r.puesto_cod
+            AND mv.mesa = r.mesa AND mv.corporacion = r.corporacion
+        ORDER BY p.municipio, r.zona_cod, r.puesto_cod, r.mesa, r.corporacion
+    """)
+    return [dict(r) for r in rows]
+
+
 @router.get("/admin/alertas/export-excel")
 async def export_alertas_excel(admin_token: str = ""):
     """Admin: export all unresolved vote_discrepancy alerts as Excel (compatible with generate_reclamaciones scripts)."""
