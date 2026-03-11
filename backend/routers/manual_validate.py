@@ -428,11 +428,17 @@ async def get_progress():
 
 
 @router.get("/admin/pending-queue")
-async def get_pending_queue(admin_token: str = ""):
-    """List all items still pending manual validation."""
+async def get_pending_queue(admin_token: str = "", clear_claims: bool = False):
+    """List all items still pending manual validation. Optionally clear all claims."""
     if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
         raise HTTPException(status_code=403, detail="Token invalido")
-    return await db.get_pending_queue_items()
+    conn = await db.get_db()
+    claims = await conn.execute_fetchall("SELECT claimed_by, municipio_cod, zona_cod, puesto_cod, mesa, corporacion, claimed_at FROM queue_claims")
+    if clear_claims:
+        await conn.execute("DELETE FROM queue_claims")
+        await conn.commit()
+    pending = await db.get_pending_queue_items()
+    return {"pending": pending, "claims": [dict(c) for c in claims], "claims_cleared": clear_claims}
 
 
 @router.get("/admin/users")
