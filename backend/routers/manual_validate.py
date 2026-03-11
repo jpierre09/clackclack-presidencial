@@ -13,7 +13,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend import database as db
-from backend.config import BASE_DIR, E14_DOWNLOADS_DIR, VALIDATE_SETUP_TOKEN
+from backend.config import (
+    BASE_DIR,
+    E14_DOWNLOADS_DIR,
+    PUBLIC_EXPORT_SHARE_TOKEN,
+    VALIDATE_SETUP_TOKEN,
+)
+
+# Exports dir sits next to e14_downloads, so it lives on /persist on Railway
+_EXPORTS_DIR = E14_DOWNLOADS_DIR.parent / "exports"
 from backend.services import alert_engine
 from backend.services.event_bus import event_bus
 
@@ -40,6 +48,55 @@ def _safe_within(path, root) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _clean_zip_segment(value: str | None, fallback: str) -> str:
+    import re as _re
+    import unicodedata as _unicodedata
+
+    normalized = _unicodedata.normalize("NFKD", value or "")
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    cleaned = _re.sub(r"[^A-Za-z0-9._ -]+", "", ascii_value)
+    cleaned = _re.sub(r"\s+", " ", cleaned).strip(" ._-")
+    return cleaned or fallback
+
+
+def _resolve_download_filepath(raw: str | None):
+    from pathlib import Path as _Path
+    import os as _os
+
+    if not raw:
+        return None
+
+    if _os.path.isabs(raw):
+        full_path = _Path(raw).resolve()
+    else:
+        full_path = (BASE_DIR / raw).resolve()
+
+    allowed = [E14_DOWNLOADS_DIR.resolve(), BASE_DIR.resolve()]
+    if not any(_safe_within(full_path, root) for root in allowed):
+        return None
+    return full_path
+
+
+def _zip_stream_response(zip_path, filename: str) -> StreamingResponse:
+    def _iter_file():
+        with open(zip_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter_file(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _require_public_export_access(share_token: str) -> None:
+    if not PUBLIC_EXPORT_SHARE_TOKEN:
+        raise HTTPException(status_code=404, detail="No encontrado")
+    if not share_token or not secrets.compare_digest(share_token, PUBLIC_EXPORT_SHARE_TOKEN):
+        raise HTTPException(status_code=404, detail="No encontrado")
 
 
 def _hash_password(password: str) -> str:
@@ -212,14 +269,13 @@ async def get_stats(username: str = Depends(_require_auth)):
 async def _resolve_pdf_path(mun: str, zona: str, puesto: str, mesa: int, corp: str):
     conn = await db.get_db()
     rows = await conn.execute_fetchall(
-        """SELECT d.filepath FROM e14_results r
-           JOIN e14_downloads d ON d.id = r.download_id
-           WHERE r.municipio_cod=? AND r.zona_cod=? AND r.puesto_cod=?
-             AND r.mesa=? AND r.corporacion=? LIMIT 1""",
+        """SELECT filepath FROM e14_downloads
+           WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+             AND mesa=? AND corporacion=? LIMIT 1""",
         (mun, zona, puesto, mesa, corp.upper()),
     )
     if not rows:
-        raise HTTPException(status_code=404, detail="Result not found")
+        raise HTTPException(status_code=404, detail="PDF file not found")
     raw = rows[0]["filepath"]
     # Support both absolute paths (Railway /persist/...) and legacy relative paths
     from pathlib import Path as _Path
@@ -283,16 +339,21 @@ async def submit(req: SubmitRequest, username: str = Depends(_require_auth)):
     if req.action == "corrected" and req.corrected_ph_votes is None:
         raise HTTPException(status_code=400, detail="corrected_ph_votes required")
 
-    await db.submit_validation({
-        "municipio_cod": req.municipio_cod,
-        "zona_cod": req.zona_cod,
-        "puesto_cod": req.puesto_cod,
-        "mesa": req.mesa,
-        "corporacion": req.corporacion.upper(),
-        "validated_by": username,
-        "action": req.action,
-        "corrected_ph_votes": req.corrected_ph_votes,
-    })
+    try:
+        await db.submit_validation({
+            "municipio_cod": req.municipio_cod,
+            "zona_cod": req.zona_cod,
+            "puesto_cod": req.puesto_cod,
+            "mesa": req.mesa,
+            "corporacion": req.corporacion.upper(),
+            "validated_by": username,
+            "action": req.action,
+            "corrected_ph_votes": req.corrected_ph_votes,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    await db.release_claim(username)
 
     # Evaluate discrepancy — fires only when both SEN and CAM are validated
     await alert_engine.evaluate_mesa(
@@ -441,6 +502,10 @@ class DeleteNoveltyRequest(BaseModel):
     admin_token: str
 
 
+class PublicMunicipioExportRequest(BaseModel):
+    municipio_cod: str
+
+
 @router.delete("/novedades/{novelty_id}")
 async def delete_novelty_and_reprocess(novelty_id: int, req: DeleteNoveltyRequest):
     """Admin: delete a novelty + its OCR result + download record + PDF so the poller re-downloads it."""
@@ -495,6 +560,496 @@ async def delete_novelty_and_reprocess(novelty_id: int, req: DeleteNoveltyReques
         "status": "ok",
         "deleted_file": deleted_file,
         "message": "Novedad eliminada — PDF será re-descargado y procesado en el próximo ciclo.",
+    }
+
+
+@router.get("/admin/debug-statuses")
+async def debug_gql_statuses(admin_token: str = "", mun: str = "001", corp: str = "001", zone: str = "99"):
+    """Admin: dump all GQL records for a mun+zone to compare standCode vs DB puesto_cod."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    from backend.services.remote_poller import RemotePoller, _QUERY_TRANSMISSION_CODES_BY_MUN
+    import httpx
+
+    poller = RemotePoller()
+    all_nodes = []
+    async with httpx.AsyncClient(follow_redirects=True) as client:
+        if not await poller._get_creds(client):
+            raise HTTPException(status_code=503, detail="No se pudieron obtener credenciales AWS")
+        for status in (3, 11):
+            data = await poller._gql(
+                client, _QUERY_TRANSMISSION_CODES_BY_MUN,
+                {"first": 5000, "status": status, "dept": "01", "corp": corp, "mun": mun},
+            )
+            if data:
+                nodes = data.get("allTransmissionCodes", {}).get("nodes") or []
+                all_nodes.extend(nodes)
+
+    # Filter to requested zone
+    filtered = [n for n in all_nodes if str(n.get("idZoneCode") or "") == zone]
+    # Compare with DB
+    conn = await db.get_db()
+    db_rows = await conn.execute_fetchall(
+        "SELECT puesto_cod, nombre FROM puestos WHERE municipio_cod=? AND zona_cod=?",
+        (mun, zone)
+    )
+    db_puestos = {r["puesto_cod"]: r["nombre"] for r in db_rows}
+    # Group GQL by standCode
+    from collections import defaultdict
+    by_stand: dict = defaultdict(list)
+    for n in filtered:
+        by_stand[str(n.get("standCode") or "")].append({
+            "mesa": n.get("numberStand"),
+            "status": n.get("idTransmissionCodeStatus"),
+            "file": n.get("expectedName"),
+        })
+
+    return {
+        "gql_standCodes": dict(by_stand),
+        "db_puesto_cods": db_puestos,
+        "gql_total_zone": len(filtered),
+    }
+
+
+@router.get("/admin/missing-mesas")
+async def get_missing_mesas(admin_token: str = "", limit: int = 10):
+    """Admin: mesas in catalog with no e14 download yet."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(f"""
+        SELECT p.municipio_cod, p.zona_cod, p.puesto_cod, p.municipio, p.nombre,
+               p.mesas,
+               COUNT(d.id) as descargas,
+               (p.mesas * 2 - COUNT(d.id)) as faltantes
+        FROM puestos p
+        LEFT JOIN e14_downloads d ON d.municipio_cod = p.municipio_cod
+            AND d.zona_cod = p.zona_cod AND d.puesto_cod = p.puesto_cod
+        WHERE p.departamento = 'ANTIOQUIA'
+        GROUP BY p.municipio_cod, p.zona_cod, p.puesto_cod
+        HAVING faltantes > 0
+        ORDER BY faltantes DESC
+        LIMIT {limit}
+    """)
+    return [dict(r) for r in rows]
+
+
+@router.get("/admin/alertas/export-excel")
+async def export_alertas_excel(admin_token: str = ""):
+    """Admin: export all unresolved vote_discrepancy alerts as Excel (compatible with generate_reclamaciones scripts)."""
+    import io, openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from datetime import datetime as _dt
+
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """
+        SELECT
+            a.municipio_cod, a.zona_cod, a.puesto_cod, a.mesa,
+            a.discrepancy_pct,
+            p.municipio, p.nombre as puesto_nombre, p.departamento,
+            -- Use corrected votes if available, else OCR
+            COALESCE(mv_sen.corrected_ph_votes, r_sen.ph_total_votos) as votos_sen,
+            COALESCE(mv_cam.corrected_ph_votes, r_cam.ph_total_votos) as votos_cam,
+            r_sen.ph_total_votos as sen_ocr, r_cam.ph_total_votos as cam_ocr,
+            r_sen.votos_urna as sen_votos_urna, r_cam.votos_urna as cam_votos_urna,
+            r_sen.ocr_confidence as sen_conf, r_cam.ocr_confidence as cam_conf,
+            mv_sen.corrected_ph_votes as sen_corrected, mv_cam.corrected_ph_votes as cam_corrected,
+            mv_sen.action as sen_action, mv_cam.action as cam_action
+        FROM alerts a
+        LEFT JOIN puestos p ON p.municipio_cod = a.municipio_cod
+            AND p.zona_cod = a.zona_cod AND p.puesto_cod = a.puesto_cod
+        LEFT JOIN e14_results r_sen ON r_sen.municipio_cod = a.municipio_cod
+            AND r_sen.zona_cod = a.zona_cod AND r_sen.puesto_cod = a.puesto_cod
+            AND r_sen.mesa = a.mesa AND r_sen.corporacion = 'SEN'
+        LEFT JOIN e14_results r_cam ON r_cam.municipio_cod = a.municipio_cod
+            AND r_cam.zona_cod = a.zona_cod AND r_cam.puesto_cod = a.puesto_cod
+            AND r_cam.mesa = a.mesa AND r_cam.corporacion = 'CAM'
+        LEFT JOIN manual_validations mv_sen ON mv_sen.municipio_cod = a.municipio_cod
+            AND mv_sen.zona_cod = a.zona_cod AND mv_sen.puesto_cod = a.puesto_cod
+            AND mv_sen.mesa = a.mesa AND mv_sen.corporacion = 'SEN'
+        LEFT JOIN manual_validations mv_cam ON mv_cam.municipio_cod = a.municipio_cod
+            AND mv_cam.zona_cod = a.zona_cod AND mv_cam.puesto_cod = a.puesto_cod
+            AND mv_cam.mesa = a.mesa AND mv_cam.corporacion = 'CAM'
+        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        ORDER BY p.municipio, a.mesa
+        """
+    )
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Alertas"
+
+    hdr_fill = PatternFill("solid", fgColor="1F3864")
+    hdr_font = Font(bold=True, color="FFFFFF", name="Calibri", size=10)
+    ctr = Alignment(horizontal="center", vertical="center")
+
+    headers = [
+        "Llave DMZPM",
+        "nombre_municipio", "codigo_zona", "nombre_puesto", "Mesa",
+        "Votos Camara", "Votos Senado", "Dif Cam-Sen",
+        "Departamento", "municipio_cod", "zona_cod", "puesto_cod",
+        "SEN OCR orig", "CAM OCR orig",
+        "SEN corregido", "CAM corregido",
+        "SEN accion", "CAM accion",
+        "SEN votos urna", "CAM votos urna",
+        "SEN confianza OCR", "CAM confianza OCR",
+    ]
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=1, column=col, value=h)
+        c.fill = hdr_fill; c.font = hdr_font; c.alignment = ctr
+
+    for row in rows:
+        mun = (row["municipio_cod"] or "").zfill(3)
+        zona = (row["zona_cod"] or "").zfill(2)
+        puesto = (row["puesto_cod"] or "").zfill(2)
+        mesa = row["mesa"] or 0
+        # Reconstruct Llave DMZPM: 1 + mun(3) + zona(2) + puesto(2) + mesa(3)
+        llave = f"1{mun}{zona}{puesto}{str(mesa).zfill(3)}"
+        votos_sen = row["votos_sen"]
+        votos_cam = row["votos_cam"]
+        dif = (votos_cam or 0) - (votos_sen or 0) if (votos_sen is not None and votos_cam is not None) else None
+        ws.append([
+            llave,
+            row["municipio"] or row["municipio_cod"],
+            zona,
+            row["puesto_nombre"] or "",
+            mesa,
+            votos_cam, votos_sen, dif,
+            row["departamento"] or "",
+            row["municipio_cod"], row["zona_cod"], row["puesto_cod"],
+            row["sen_ocr"], row["cam_ocr"],
+            row["sen_corrected"], row["cam_corrected"],
+            row["sen_action"], row["cam_action"],
+            row["sen_votos_urna"], row["cam_votos_urna"],
+            row["sen_conf"], row["cam_conf"],
+        ])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"alertas_discrepancia_{_dt.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.post("/admin/alertas/generate-zip")
+async def generate_alertas_zip(req: DeleteNoveltyRequest):
+    """Admin: build ZIP of all vote_discrepancy PDFs and save to /persist/exports/. Returns filename."""
+    import asyncio as _asyncio, io, zipfile
+    from pathlib import Path as _Path
+    from datetime import datetime as _dt
+
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """
+        SELECT a.municipio_cod, a.zona_cod, a.puesto_cod, a.mesa,
+               a.discrepancy_pct,
+               d_sen.filepath as sen_path, d_sen.filename as sen_filename,
+               d_cam.filepath as cam_path, d_cam.filename as cam_filename
+        FROM alerts a
+        LEFT JOIN e14_downloads d_sen ON d_sen.municipio_cod = a.municipio_cod
+            AND d_sen.zona_cod = a.zona_cod AND d_sen.puesto_cod = a.puesto_cod
+            AND d_sen.mesa = a.mesa AND d_sen.corporacion = 'SEN'
+        LEFT JOIN e14_downloads d_cam ON d_cam.municipio_cod = a.municipio_cod
+            AND d_cam.zona_cod = a.zona_cod AND d_cam.puesto_cod = a.puesto_cod
+            AND d_cam.mesa = a.mesa AND d_cam.corporacion = 'CAM'
+        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        ORDER BY a.discrepancy_pct DESC
+        """
+    )
+
+    rows_list = list(rows)
+    exports_dir = _EXPORTS_DIR
+    exports_dir.mkdir(parents=True, exist_ok=True)
+    fname = f"alertas_discrepancia_{_dt.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    out_path = exports_dir / fname
+
+    def _build():
+        added: set[str] = set()
+        with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
+            for row in rows_list:
+                for path_field, name_field in [("sen_path", "sen_filename"), ("cam_path", "cam_filename")]:
+                    filepath = row[path_field]
+                    filename = row[name_field]
+                    if not filepath or filepath in added:
+                        continue
+                    p = _Path(filepath)
+                    if p.exists():
+                        mun = row["municipio_cod"]
+                        mesa = row["mesa"]
+                        pct = row["discrepancy_pct"]
+                        arcname = f"{pct:.0f}pct/{mun}_mesa{mesa:03d}_{filename or p.name}"
+                        zf.write(str(p), arcname)
+                        added.add(filepath)
+        return str(out_path), len(added)
+
+    loop = _asyncio.get_event_loop()
+    zip_path, count = await loop.run_in_executor(None, _build)
+    return {"status": "ok", "filename": fname, "files": count, "path": zip_path}
+
+
+@router.get("/admin/alertas/download-zip")
+async def download_alertas_zip(admin_token: str = "", filename: str = ""):
+    """Admin: download a previously generated ZIP by filename."""
+    from pathlib import Path as _Path
+
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+    if not filename or "/" in filename or "\\" in filename or not filename.endswith(".zip"):
+        raise HTTPException(status_code=400, detail="Nombre de archivo inválido")
+
+    exports_dir = _EXPORTS_DIR
+    zip_path = exports_dir / filename
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado — usa /generate-zip primero")
+
+    def _iter_file():
+        with open(zip_path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter_file(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/public-exports/share/{share_token}/municipios")
+async def list_public_export_municipios(share_token: str):
+    _require_public_export_access(share_token)
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """
+        SELECT d.municipio_cod,
+               COALESCE(MAX(NULLIF(TRIM(p.municipio), '')), d.municipio_cod) as municipio,
+               COUNT(*) as pdf_count
+        FROM e14_downloads d
+        LEFT JOIN puestos p
+          ON p.municipio_cod = d.municipio_cod
+         AND p.zona_cod = d.zona_cod
+         AND p.puesto_cod = d.puesto_cod
+        GROUP BY d.municipio_cod
+        ORDER BY municipio, d.municipio_cod
+        """
+    )
+    return [
+        {
+            "municipio_cod": row["municipio_cod"],
+            "municipio": row["municipio"],
+            "pdf_count": row["pdf_count"],
+        }
+        for row in rows
+    ]
+
+
+@router.get("/public-exports/share/{share_token}/{filename}")
+async def download_public_export(share_token: str, filename: str):
+    """Download a share-only ZIP from /persist/exports using the share token."""
+    _require_public_export_access(share_token)
+    if (
+        not filename
+        or "/" in filename
+        or "\\" in filename
+        or not filename.endswith(".zip")
+        or not filename.startswith("public_")
+    ):
+        raise HTTPException(status_code=400, detail="Nombre de archivo inválido")
+
+    zip_path = _EXPORTS_DIR / filename
+    if not zip_path.exists():
+        raise HTTPException(status_code=404, detail="Archivo no encontrado")
+
+    return _zip_stream_response(zip_path, filename)
+
+
+@router.post("/public-exports/share/{share_token}/generate-municipio")
+async def generate_public_municipio_export(share_token: str, req: PublicMunicipioExportRequest):
+    _require_public_export_access(share_token)
+    import asyncio as _asyncio
+    import csv as _csv
+    import os as _os
+    import zipfile as _zipfile
+
+    municipio_cod = (req.municipio_cod or "").strip()
+    if not municipio_cod:
+        raise HTTPException(status_code=400, detail="municipio_cod es requerido")
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """
+        SELECT d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa, d.corporacion,
+               d.filename, d.filepath,
+               p.municipio, p.nombre as puesto_nombre
+        FROM e14_downloads d
+        LEFT JOIN puestos p
+          ON p.municipio_cod = d.municipio_cod
+         AND p.zona_cod = d.zona_cod
+         AND p.puesto_cod = d.puesto_cod
+        WHERE d.municipio_cod = ?
+        ORDER BY d.zona_cod, d.puesto_cod, d.mesa, d.corporacion
+        """,
+        (municipio_cod,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="No hay PDFs descargados para ese municipio")
+
+    rows_list = [dict(row) for row in rows]
+    municipio_nombre = next(
+        (str(row.get("municipio") or "").strip() for row in rows_list if row.get("municipio")),
+        municipio_cod,
+    )
+    municipio_slug = _clean_zip_segment(municipio_nombre, f"municipio_{municipio_cod}").lower().replace(" ", "_")
+    root_dir = f"E14_{municipio_cod}-{_clean_zip_segment(municipio_nombre, municipio_cod)}"
+    filename = f"public_e14_municipio_{municipio_cod}_{municipio_slug}.zip"
+    zip_path = _EXPORTS_DIR / filename
+    tmp_path = zip_path.with_suffix(".zip.tmp")
+
+    def _build_zip() -> tuple[int, int, int]:
+        _EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+        files_added = 0
+        missing_files = 0
+        seen_paths: set[str] = set()
+        manifest_buffer = io.StringIO()
+        manifest_writer = _csv.writer(manifest_buffer)
+        manifest_writer.writerow([
+            "municipio_cod",
+            "municipio",
+            "zona_cod",
+            "puesto_cod",
+            "puesto_nombre",
+            "mesa",
+            "corporacion",
+            "source_filename",
+            "zip_path",
+        ])
+
+        with _zipfile.ZipFile(tmp_path, "w", compression=_zipfile.ZIP_STORED) as zf:
+            for row in rows_list:
+                resolved_path = _resolve_download_filepath(row.get("filepath"))
+                if resolved_path is None or not resolved_path.exists():
+                    missing_files += 1
+                    continue
+
+                source_key = str(resolved_path)
+                if source_key in seen_paths:
+                    continue
+                seen_paths.add(source_key)
+
+                zona_cod = str(row.get("zona_cod") or "").zfill(2)
+                puesto_cod = str(row.get("puesto_cod") or "").zfill(2)
+                mesa = int(row.get("mesa") or 0)
+                corporacion = str(row.get("corporacion") or "").upper() or "PDF"
+                puesto_nombre = _clean_zip_segment(row.get("puesto_nombre"), f"PUESTO_{puesto_cod}")
+                zip_member = (
+                    f"{root_dir}/"
+                    f"{zona_cod}-ZONA/"
+                    f"{puesto_cod}-{puesto_nombre}/"
+                    f"MESA_{mesa:03d}_{corporacion}.pdf"
+                )
+                zf.write(str(resolved_path), zip_member)
+                manifest_writer.writerow([
+                    municipio_cod,
+                    municipio_nombre,
+                    zona_cod,
+                    puesto_cod,
+                    row.get("puesto_nombre") or "",
+                    mesa,
+                    corporacion,
+                    row.get("filename") or resolved_path.name,
+                    zip_member,
+                ])
+                files_added += 1
+
+            zf.writestr("MANIFEST.csv", manifest_buffer.getvalue())
+
+        _os.replace(tmp_path, zip_path)
+        return files_added, missing_files, zip_path.stat().st_size
+
+    loop = _asyncio.get_event_loop()
+    files_added, missing_files, size_bytes = await loop.run_in_executor(None, _build_zip)
+
+    if files_added == 0:
+        if zip_path.exists():
+            zip_path.unlink()
+        raise HTTPException(status_code=404, detail="No hay archivos disponibles para exportar en ese municipio")
+
+    return {
+        "status": "ok",
+        "municipio_cod": municipio_cod,
+        "municipio": municipio_nombre,
+        "filename": filename,
+        "public_url": f"/api/validar/public-exports/share/{share_token}/{filename}",
+        "files": files_added,
+        "missing_files": missing_files,
+        "size_bytes": size_bytes,
+    }
+
+
+@router.post("/admin/novedades/purge-bad-scan")
+async def purge_bad_scan_novelties(req: DeleteNoveltyRequest):
+    """Admin: delete all 'Mal escaneado' novelties + their OCR results + PDFs so they get re-downloaded."""
+    from pathlib import Path as _Path
+
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(req.admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token inválido")
+
+    conn = await db.get_db()
+    rows = await conn.execute_fetchall(
+        """SELECT mv.id as mv_id, mv.municipio_cod, mv.zona_cod, mv.puesto_cod,
+                  mv.mesa, mv.corporacion,
+                  r.id as result_id, r.download_id, d.filepath
+           FROM manual_validations mv
+           LEFT JOIN e14_results r ON (
+               r.municipio_cod = mv.municipio_cod AND r.zona_cod = mv.zona_cod AND
+               r.puesto_cod = mv.puesto_cod AND r.mesa = mv.mesa AND r.corporacion = mv.corporacion
+           )
+           LEFT JOIN e14_downloads d ON d.id = r.download_id
+           WHERE mv.novelty_note LIKE '%mal escaneado%'""",
+    )
+    if not rows:
+        return {"status": "ok", "deleted": 0, "message": "No hay novedades de 'Mal escaneado'."}
+
+    deleted_files: list[str] = []
+    for row in rows:
+        await conn.execute(
+            "DELETE FROM queue_claims WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=? AND mesa=? AND corporacion=?",
+            (row["municipio_cod"], row["zona_cod"], row["puesto_cod"], row["mesa"], row["corporacion"])
+        )
+        await conn.execute("DELETE FROM manual_validations WHERE id = ?", (row["mv_id"],))
+        if row["result_id"]:
+            await conn.execute("DELETE FROM e14_results WHERE id = ?", (row["result_id"],))
+        if row["download_id"]:
+            await conn.execute("DELETE FROM e14_downloads WHERE id = ?", (row["download_id"],))
+        if row["filepath"]:
+            try:
+                _Path(row["filepath"]).unlink(missing_ok=True)
+                deleted_files.append(row["filepath"])
+            except Exception:
+                pass
+
+    await conn.commit()
+
+    return {
+        "status": "ok",
+        "deleted": len(rows),
+        "deleted_files": len(deleted_files),
+        "message": f"{len(rows)} novedades eliminadas — PDFs serán re-descargados en el próximo ciclo.",
     }
 
 
