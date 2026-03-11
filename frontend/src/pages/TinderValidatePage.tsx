@@ -154,9 +154,6 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
         return;
       }
       if (noveltyOpen) {
-        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-          void submitNovelty();
-        }
         return;
       }
       if (editMode) {
@@ -427,7 +424,8 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
               value={noveltyText}
               onChange={(e) => setNoveltyText(e.target.value)}
               onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
                   void submitNovelty();
                 }
               }}
@@ -444,7 +442,7 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
                 Cancelar
               </button>
               <button className="tinder-btn approve" onClick={submitNovelty} disabled={!noveltyText.trim()}>
-                Enviar (Ctrl+Enter)
+                Enviar (Enter)
               </button>
             </div>
           </div>
