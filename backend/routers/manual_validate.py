@@ -427,6 +427,14 @@ async def get_progress():
     return await db.get_e14_progress()
 
 
+@router.get("/admin/pending-queue")
+async def get_pending_queue(admin_token: str = ""):
+    """List all items still pending manual validation."""
+    if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        raise HTTPException(status_code=403, detail="Token invalido")
+    return await db.get_pending_queue_items()
+
+
 @router.get("/admin/users")
 async def list_users(admin_token: str = ""):
     if not VALIDATE_SETUP_TOKEN or not secrets.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):

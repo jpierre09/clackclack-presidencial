@@ -732,16 +732,30 @@ async def get_dashboard_summary() -> dict:
     }
 
 
-async def get_hierarchy() -> list[dict]:
+async def get_hierarchy(municipio_cod: str | None = None) -> list[dict]:
     """Get hierarchical data: municipio > zona > puesto > mesas.
 
     Replaces the old N+1 nested loop (9 000+ queries) with 3 flat queries
     that are then assembled into the tree in Python.
     """
     db = await get_db()
+    puesto_params: list[object] = []
+    mesa_params: list[object] = []
+    alert_params: list[object] = []
+    puesto_filter = ""
+    mesa_filter = ""
+    alert_filter = ""
+
+    if municipio_cod:
+        puesto_filter = " AND p.municipio_cod = ?"
+        mesa_filter = " WHERE d2.municipio_cod = ?"
+        alert_filter = " AND municipio_cod = ?"
+        puesto_params.append(municipio_cod)
+        mesa_params.append(municipio_cod)
+        alert_params.append(municipio_cod)
 
     # ── Query 1: all puestos for Antioquia with per-puesto alert count ─────────
-    puesto_rows = await db.execute_fetchall("""
+    puesto_rows = await db.execute_fetchall(f"""
         SELECT
             p.municipio_cod, p.municipio,
             p.zona_cod, p.puesto_cod, p.nombre, p.mesas, p.lat, p.lon,
@@ -750,13 +764,13 @@ async def get_hierarchy() -> list[dict]:
         LEFT JOIN alerts a ON a.municipio_cod = p.municipio_cod
             AND a.zona_cod = p.zona_cod AND a.puesto_cod = p.puesto_cod
             AND a.is_resolved = 0
-        WHERE p.departamento = 'ANTIOQUIA'
+        WHERE p.departamento = 'ANTIOQUIA'{puesto_filter}
         GROUP BY p.municipio_cod, p.zona_cod, p.puesto_cod
         ORDER BY p.municipio_cod, p.zona_cod, p.puesto_cod
-    """)
+    """, puesto_params)
 
     # ── Query 2: all mesas data flat (one row per mesa) ────────────────────────
-    mesa_rows = await db.execute_fetchall("""
+    mesa_rows = await db.execute_fetchall(f"""
         SELECT
             d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa,
             rs.ph_total_votos AS sen_votes, rc.ph_total_votos AS cam_votes,
@@ -770,6 +784,7 @@ async def get_hierarchy() -> list[dict]:
             JOIN puestos p2 ON p2.municipio_cod = d2.municipio_cod
                 AND p2.zona_cod = d2.zona_cod AND p2.puesto_cod = d2.puesto_cod
                 AND p2.departamento = 'ANTIOQUIA'
+            {mesa_filter}
         ) d
         LEFT JOIN e14_results rs ON rs.municipio_cod = d.municipio_cod
             AND rs.zona_cod = d.zona_cod AND rs.puesto_cod = d.puesto_cod
@@ -785,17 +800,17 @@ async def get_hierarchy() -> list[dict]:
             AND mv_n.mesa = d.mesa
             AND mv_n.novelty_note IS NOT NULL AND mv_n.novelty_note != ''
         ORDER BY d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa
-    """)
+    """, mesa_params)
 
     # ── Query 3: municipio-level danger / warning counts ───────────────────────
-    alert_rows = await db.execute_fetchall("""
+    alert_rows = await db.execute_fetchall(f"""
         SELECT municipio_cod,
             COUNT(DISTINCT CASE WHEN severity = 'danger'  THEN id END) AS alerts_danger,
             COUNT(DISTINCT CASE WHEN severity = 'warning' THEN id END) AS alerts_warning
         FROM alerts
-        WHERE is_resolved = 0
+        WHERE is_resolved = 0{alert_filter}
         GROUP BY municipio_cod
-    """)
+    """, alert_params)
     mun_alerts: dict[str, dict] = {r["municipio_cod"]: dict(r) for r in alert_rows}
 
     # ── Assemble tree in Python ────────────────────────────────────────────────
@@ -862,6 +877,27 @@ async def get_hierarchy() -> list[dict]:
         item["municipio"],
     ))
     return municipios
+
+
+async def get_municipio_options() -> list[dict]:
+    """Return lightweight municipio options for filter selects."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """
+        SELECT municipio_cod, MAX(municipio) AS municipio
+        FROM puestos
+        WHERE departamento = 'ANTIOQUIA'
+        GROUP BY municipio_cod
+        ORDER BY municipio
+        """
+    )
+    return [
+        {
+            "municipio_cod": row["municipio_cod"],
+            "municipio": row["municipio"],
+        }
+        for row in rows
+    ]
 
 
 async def get_alerts(municipio_cod: str = None, resolved: bool = False) -> list[dict]:
@@ -1024,6 +1060,77 @@ async def get_alert_review_items(
     return [_build_alert_review_item(dict(row)) for row in rows]
 
 
+async def get_alert_review_summary(municipio_cod: str | None = None) -> dict[str, int]:
+    db = await get_db()
+    query = """
+        SELECT
+            SUM(CASE WHEN a.review_decision = 'real_alert' THEN 1 ELSE 0 END) AS real_alert,
+            SUM(CASE WHEN a.review_decision = 'false_alert' THEN 1 ELSE 0 END) AS false_alert,
+            SUM(CASE WHEN a.is_resolved = 0 AND a.review_decision IS NULL THEN 1 ELSE 0 END) AS pending
+        FROM alerts a
+        WHERE a.alert_type = 'vote_discrepancy'
+    """
+    params: list[str] = []
+    if municipio_cod:
+        query += " AND a.municipio_cod = ?"
+        params.append(municipio_cod)
+
+    rows = await db.execute_fetchall(query, params)
+    row = dict(rows[0]) if rows else {}
+    real_alert = int(row.get("real_alert") or 0)
+    false_alert = int(row.get("false_alert") or 0)
+    pending = int(row.get("pending") or 0)
+    return {
+        "real_alert": real_alert,
+        "false_alert": false_alert,
+        "pending": pending,
+        "reviewed_total": real_alert + false_alert,
+    }
+
+
+async def bulk_review_pending_alerts(
+    decision: str,
+    reviewed_by: str = "dashboard_bulk",
+    municipio_cod: str | None = None,
+) -> dict[str, int]:
+    db = await get_db()
+    now = datetime.now().isoformat()
+    is_false_alert = decision == "false_alert"
+
+    query = """
+        UPDATE alerts
+        SET review_decision = ?,
+            reviewed_at = ?,
+            reviewed_by = ?,
+            is_resolved = ?,
+            resolved_at = ?,
+            resolved_by = ?
+        WHERE alert_type = 'vote_discrepancy'
+          AND is_resolved = 0
+          AND review_decision IS NULL
+    """
+    params: list[object] = [
+        decision,
+        now,
+        reviewed_by,
+        1 if is_false_alert else 0,
+        now if is_false_alert else None,
+        reviewed_by if is_false_alert else None,
+    ]
+    if municipio_cod:
+        query += " AND municipio_cod = ?"
+        params.append(municipio_cod)
+
+    await db.execute(query, params)
+    await db.commit()
+    changed_row = await db.execute_fetchall("SELECT changes() AS n")
+    summary = await get_alert_review_summary(municipio_cod)
+    return {
+        "updated": int(changed_row[0]["n"] if changed_row else 0),
+        **summary,
+    }
+
+
 async def review_alert(alert_id: int, decision: str, reviewed_by: str = "dashboard") -> bool:
     db = await get_db()
     rows = await db.execute_fetchall(
@@ -1151,6 +1258,29 @@ async def get_alerts_for_reclamation(level: str, mun: str,
         params.append(mesa)
     query += " ORDER BY a.zona_cod, a.puesto_cod, a.mesa"
     rows = await db.execute_fetchall(query, params)
+    return [dict(r) for r in rows]
+
+
+async def get_all_alerts_for_reclamation() -> list[dict]:
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        """
+        SELECT a.*, p.municipio, p.nombre as puesto_nombre,
+            rs.ph_total_votos as sen_votes_actual,
+            rc.ph_total_votos as cam_votes_actual
+        FROM alerts a
+        JOIN puestos p ON p.municipio_cod = a.municipio_cod
+            AND p.zona_cod = a.zona_cod AND p.puesto_cod = a.puesto_cod
+        LEFT JOIN e14_results rs ON rs.municipio_cod = a.municipio_cod
+            AND rs.zona_cod = a.zona_cod AND rs.puesto_cod = a.puesto_cod
+            AND rs.mesa = a.mesa AND rs.corporacion = 'SEN'
+        LEFT JOIN e14_results rc ON rc.municipio_cod = a.municipio_cod
+            AND rc.zona_cod = a.zona_cod AND rc.puesto_cod = a.puesto_cod
+            AND rc.mesa = a.mesa AND rc.corporacion = 'CAM'
+        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        ORDER BY p.municipio, a.zona_cod, a.puesto_cod, a.mesa
+        """
+    )
     return [dict(r) for r in rows]
 
 
@@ -1546,32 +1676,59 @@ async def delete_session(token: str):
 
 # --- Manual validations ---
 
-_UNCLAIMED_QUEUE_SQL = """
-    SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
-           r.corporacion, r.ph_total_votos, r.ph_votos_lista,
+_MANUAL_QUEUE_SOURCE_SQL = """
+    SELECT d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa,
+           d.corporacion, r.ph_total_votos, r.ph_votos_lista,
            r.votos_urna, r.ocr_confidence, r.processed_at,
-           d.filepath,
-           p.municipio, p.nombre as puesto_nombre
-    FROM e14_results r
-    JOIN e14_downloads d ON d.id = r.download_id
-    LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
-        AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+           d.filepath, p.municipio, p.nombre AS puesto_nombre,
+           r.status AS result_status,
+           CASE
+               WHEN r.id IS NULL THEN 1
+               WHEN r.status IN ('processed', 'corrected') THEN 0
+               ELSE 1
+           END AS needs_manual_votes,
+           CASE
+               WHEN r.id IS NULL THEN d.downloaded_at
+               ELSE COALESCE(r.processed_at, d.downloaded_at)
+           END AS queue_sort_at
+    FROM e14_downloads d
+    LEFT JOIN e14_results r
+        ON r.municipio_cod = d.municipio_cod
+        AND r.zona_cod = d.zona_cod
+        AND r.puesto_cod = d.puesto_cod
+        AND r.mesa = d.mesa
+        AND r.corporacion = d.corporacion
+    LEFT JOIN puestos p ON p.municipio_cod = d.municipio_cod
+        AND p.zona_cod = d.zona_cod AND p.puesto_cod = d.puesto_cod
+    WHERE r.id IS NULL OR r.status IN ('processed', 'corrected', 'error', 'not_digitized')
+"""
+
+
+_UNCLAIMED_QUEUE_SQL = f"""
+    WITH queue_candidates AS (
+        {_MANUAL_QUEUE_SOURCE_SQL}
+    )
+    SELECT qcand.municipio_cod, qcand.zona_cod, qcand.puesto_cod, qcand.mesa,
+           qcand.corporacion, qcand.ph_total_votos, qcand.ph_votos_lista,
+           qcand.votos_urna, qcand.ocr_confidence, qcand.processed_at,
+           qcand.filepath, qcand.municipio, qcand.puesto_nombre,
+           qcand.result_status, qcand.needs_manual_votes
+    FROM queue_candidates qcand
     LEFT JOIN manual_validations mv
-        ON mv.municipio_cod = r.municipio_cod
-        AND mv.zona_cod = r.zona_cod
-        AND mv.puesto_cod = r.puesto_cod
-        AND mv.mesa = r.mesa
-        AND mv.corporacion = r.corporacion
-    LEFT JOIN queue_claims qc
-        ON qc.municipio_cod = r.municipio_cod
-        AND qc.zona_cod = r.zona_cod
-        AND qc.puesto_cod = r.puesto_cod
-        AND qc.mesa = r.mesa
-        AND qc.corporacion = r.corporacion
-    WHERE r.status IN ('processed', 'corrected')
-      AND mv.id IS NULL
-      AND qc.claimed_by IS NULL
-    ORDER BY r.processed_at DESC
+        ON mv.municipio_cod = qcand.municipio_cod
+        AND mv.zona_cod = qcand.zona_cod
+        AND mv.puesto_cod = qcand.puesto_cod
+        AND mv.mesa = qcand.mesa
+        AND mv.corporacion = qcand.corporacion
+    LEFT JOIN queue_claims qclaim
+        ON qclaim.municipio_cod = qcand.municipio_cod
+        AND qclaim.zona_cod = qcand.zona_cod
+        AND qclaim.puesto_cod = qcand.puesto_cod
+        AND qclaim.mesa = qcand.mesa
+        AND qclaim.corporacion = qcand.corporacion
+    WHERE mv.id IS NULL
+      AND qclaim.claimed_by IS NULL
+    ORDER BY qcand.needs_manual_votes DESC, qcand.queue_sort_at DESC
     LIMIT 2
 """
 
@@ -1584,22 +1741,22 @@ async def get_next_unvalidated(username: str) -> tuple[dict | None, str | None]:
 
     # 1. Return existing claim for this user if any
     claimed = await db.execute_fetchall(
-        """
-        SELECT r.municipio_cod, r.zona_cod, r.puesto_cod, r.mesa,
-               r.corporacion, r.ph_total_votos, r.ph_votos_lista,
-               r.votos_urna, r.ocr_confidence, r.processed_at,
-               d.filepath,
-               p.municipio, p.nombre as puesto_nombre
+        f"""
+        WITH queue_candidates AS (
+            {_MANUAL_QUEUE_SOURCE_SQL}
+        )
+        SELECT qcand.municipio_cod, qcand.zona_cod, qcand.puesto_cod, qcand.mesa,
+               qcand.corporacion, qcand.ph_total_votos, qcand.ph_votos_lista,
+               qcand.votos_urna, qcand.ocr_confidence, qcand.processed_at,
+               qcand.filepath, qcand.municipio, qcand.puesto_nombre,
+               qcand.result_status, qcand.needs_manual_votes
         FROM queue_claims qc
-        JOIN e14_results r
-            ON r.municipio_cod = qc.municipio_cod
-            AND r.zona_cod = qc.zona_cod
-            AND r.puesto_cod = qc.puesto_cod
-            AND r.mesa = qc.mesa
-            AND r.corporacion = qc.corporacion
-        JOIN e14_downloads d ON d.id = r.download_id
-        LEFT JOIN puestos p ON p.municipio_cod = r.municipio_cod
-            AND p.zona_cod = r.zona_cod AND p.puesto_cod = r.puesto_cod
+        JOIN queue_candidates qcand
+            ON qcand.municipio_cod = qc.municipio_cod
+            AND qcand.zona_cod = qc.zona_cod
+            AND qcand.puesto_cod = qc.puesto_cod
+            AND qcand.mesa = qc.mesa
+            AND qcand.corporacion = qc.corporacion
         WHERE qc.claimed_by = ?
         LIMIT 1
         """,
@@ -1611,6 +1768,7 @@ async def get_next_unvalidated(username: str) -> tuple[dict | None, str | None]:
             r["municipio_cod"], r["zona_cod"], r["puesto_cod"], r["mesa"], r["corporacion"]
         )
         r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
+        r["needs_manual_votes"] = bool(r.get("needs_manual_votes"))
         # Peek at next unclaimed item for prefetch
         peek = await db.execute_fetchall(_UNCLAIMED_QUEUE_SQL)
         prefetch_url = None
@@ -1656,6 +1814,7 @@ async def get_next_unvalidated(username: str) -> tuple[dict | None, str | None]:
     await db.commit()
 
     r["screenshot_url"] = f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}"
+    r["needs_manual_votes"] = bool(r.get("needs_manual_votes"))
     return r, prefetch_url
 
 
@@ -1666,14 +1825,57 @@ async def release_claim(username: str):
     await db.commit()
 
 
+async def get_pending_queue_items() -> list[dict]:
+    """Return all items still pending manual validation (not yet in manual_validations)."""
+    db = await get_db()
+    rows = await db.execute_fetchall(
+        f"""
+        WITH queue_candidates AS (
+            {_MANUAL_QUEUE_SOURCE_SQL}
+        )
+        SELECT qcand.municipio_cod, qcand.zona_cod, qcand.puesto_cod, qcand.mesa,
+               qcand.corporacion, qcand.ph_total_votos, qcand.needs_manual_votes,
+               qcand.municipio, qcand.puesto_nombre, qcand.result_status,
+               qcand.ocr_confidence, qcand.votos_urna
+        FROM queue_candidates qcand
+        LEFT JOIN manual_validations mv
+            ON mv.municipio_cod = qcand.municipio_cod
+            AND mv.zona_cod = qcand.zona_cod
+            AND mv.puesto_cod = qcand.puesto_cod
+            AND mv.mesa = qcand.mesa
+            AND mv.corporacion = qcand.corporacion
+        WHERE mv.id IS NULL
+        ORDER BY qcand.needs_manual_votes DESC, qcand.queue_sort_at DESC
+        """
+    )
+    return [dict(r) for r in rows]
+
+
 async def get_validation_stats() -> dict:
     db = await get_db()
     rows = await db.execute_fetchall(
-        """
+        f"""
+        WITH queue_candidates AS (
+            {_MANUAL_QUEUE_SOURCE_SQL}
+        ),
+        unvalidated_queue AS (
+            SELECT qcand.*
+            FROM queue_candidates qcand
+            LEFT JOIN manual_validations mv
+                ON mv.municipio_cod = qcand.municipio_cod
+                AND mv.zona_cod = qcand.zona_cod
+                AND mv.puesto_cod = qcand.puesto_cod
+                AND mv.mesa = qcand.mesa
+                AND mv.corporacion = qcand.corporacion
+            WHERE mv.id IS NULL
+        )
         SELECT
             (SELECT COUNT(*) FROM e14_results
              WHERE status IN ('processed', 'corrected')) AS total_processed,
+            (SELECT COUNT(*) FROM queue_candidates) AS total_queue_items,
             (SELECT COUNT(*) FROM manual_validations) AS total_validated,
+            (SELECT COUNT(*) FROM unvalidated_queue) AS pending_queue,
+            (SELECT COUNT(*) FROM unvalidated_queue WHERE needs_manual_votes = 1) AS pending_without_ocr,
             (SELECT COUNT(*) FROM manual_validations WHERE action = 'corrected') AS total_corrected,
             (SELECT COUNT(*) FROM manual_validations WHERE novelty_note IS NOT NULL) AS total_novelty
         """
@@ -1681,10 +1883,12 @@ async def get_validation_stats() -> dict:
     r = rows[0]
     return {
         "total_processed": r[0] or 0,
-        "total_validated": r[1] or 0,
-        "pending": max(0, (r[0] or 0) - (r[1] or 0)),
-        "total_corrected": r[2] or 0,
-        "total_novelty": r[3] or 0,
+        "total_queue_items": r[1] or 0,
+        "total_validated": r[2] or 0,
+        "pending": r[3] or 0,
+        "pending_without_ocr": r[4] or 0,
+        "total_corrected": r[5] or 0,
+        "total_novelty": r[6] or 0,
     }
 
 
@@ -1695,6 +1899,24 @@ async def submit_validation(data: dict):
     puesto = data["puesto_cod"]
     mesa = data["mesa"]
     corp = data["corporacion"]
+    now = datetime.now().isoformat()
+
+    existing_rows = await db.execute_fetchall(
+        """
+        SELECT id, download_id, status
+        FROM e14_results
+        WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+          AND mesa = ? AND corporacion = ?
+        LIMIT 1
+        """,
+        (mun, zona, puesto, mesa, corp),
+    )
+    existing = dict(existing_rows[0]) if existing_rows else None
+
+    if data["action"] == "approved" and (
+        not existing or existing["status"] not in ("processed", "corrected")
+    ):
+        raise ValueError("No hay OCR para aprobar; ingresa el valor manual.")
 
     await db.execute(
         """
@@ -1716,29 +1938,76 @@ async def submit_validation(data: dict):
             data["action"],
             data.get("corrected_ph_votes"),
             data.get("novelty_note"),
-            datetime.now().isoformat(),
+            now,
         ),
     )
 
-    # If corrected, update the result row
+    # If corrected, update or create the result row so manual capture becomes canonical.
     if data["action"] == "corrected" and data.get("corrected_ph_votes") is not None:
-        await db.execute(
-            """
-            UPDATE e14_results SET
-                ph_total_votos = ?,
-                status = 'corrected',
-                corrected_by = ?,
-                corrected_at = ?
-            WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
-              AND mesa = ? AND corporacion = ?
-            """,
-            (
-                data["corrected_ph_votes"],
-                data["validated_by"],
-                datetime.now().isoformat(),
-                mun, zona, puesto, mesa, corp,
-            ),
-        )
+        if existing:
+            await db.execute(
+                """
+                UPDATE e14_results SET
+                    ph_total_votos = ?,
+                    status = 'corrected',
+                    error_message = NULL,
+                    corrected_by = ?,
+                    corrected_at = ?,
+                    processed_at = COALESCE(processed_at, ?)
+                WHERE id = ?
+                """,
+                (
+                    data["corrected_ph_votes"],
+                    data["validated_by"],
+                    now,
+                    now,
+                    existing["id"],
+                ),
+            )
+        else:
+            download_rows = await db.execute_fetchall(
+                """
+                SELECT id
+                FROM e14_downloads
+                WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+                  AND mesa = ? AND corporacion = ?
+                LIMIT 1
+                """,
+                (mun, zona, puesto, mesa, corp),
+            )
+            if not download_rows:
+                raise ValueError("No se encontro el PDF descargado para esta mesa.")
+            download_id = download_rows[0]["id"]
+            await db.execute(
+                """
+                INSERT INTO e14_results (
+                    download_id, municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+                    ph_total_votos, status, processed_at, corrected_by, corrected_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'corrected', ?, ?, ?)
+                ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+                DO UPDATE SET
+                    download_id = excluded.download_id,
+                    ph_total_votos = excluded.ph_total_votos,
+                    status = 'corrected',
+                    error_message = NULL,
+                    processed_at = COALESCE(e14_results.processed_at, excluded.processed_at),
+                    corrected_by = excluded.corrected_by,
+                    corrected_at = excluded.corrected_at
+                """,
+                (
+                    download_id,
+                    mun,
+                    zona,
+                    puesto,
+                    mesa,
+                    corp,
+                    data["corrected_ph_votes"],
+                    now,
+                    data["validated_by"],
+                    now,
+                ),
+            )
 
     # Release the claim so the next item can be assigned
     await db.execute(
