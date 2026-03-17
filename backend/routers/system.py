@@ -57,7 +57,7 @@ async def sftp_sync(background_tasks: BackgroundTasks):
             new_files = await download_new_pdfs()
             processed = 0
             for meta in new_files:
-                ok, _ = await ingest_file(Path(meta["local_path"]))
+                ok, _ = await ingest_file(Path(meta["local_path"]), retry_not_digitized=True)
                 if ok:
                     processed += 1
             log.info("SFTP sync done: %d downloaded, %d processed", len(new_files), processed)
@@ -156,6 +156,8 @@ async def retry_not_digitized():
     """Delete not_digitized records + their PDF files so the poller re-downloads them when Registraduría has digitized them."""
     from pathlib import Path as _Path
     from backend import database as db
+    from backend.services.sftp_downloader import clear_state
+    clear_state()
 
     conn = await db.get_db()
     rows = await conn.execute_fetchall(
@@ -557,6 +559,27 @@ async def patch_novelty(
 
     await conn.commit()
     return {"status": "ok", "patched": patched, "note": note}
+
+
+@router.get("/admin/download-db")
+async def download_db(admin_token: str = ""):
+    """Admin: stream the SQLite database file for backup."""
+    import secrets as _sec
+    from fastapi.responses import StreamingResponse as _SR
+    from backend.config import DB_PATH, VALIDATE_SETUP_TOKEN
+    if not VALIDATE_SETUP_TOKEN or not _sec.compare_digest(admin_token, VALIDATE_SETUP_TOKEN):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=403, detail="Token inválido")
+    if not DB_PATH.exists():
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="DB not found")
+    def _iter():
+        with open(DB_PATH, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+    fname = f"clackclack_backup_{__import__('datetime').datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    return _SR(_iter(), media_type="application/octet-stream",
+               headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @router.get("/status")
