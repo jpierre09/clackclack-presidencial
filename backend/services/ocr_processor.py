@@ -159,6 +159,10 @@ async def process_e14(download_id: int, filepath: str,
             "processed_at":   datetime.now().isoformat(),
         }
 
+        # Enriquecer result_data con firmas y recuento para el seed del Tinder
+        result_data["_firmas_list"]   = [bool(x) for x in (firmas or [])]
+        result_data["_tiene_recuento"] = tiene_recuento
+
         result_id = await db.insert_result(result_data)
         log.info("OCR local OK mesa=%s conf=%s%%", mesa, confidence)
 

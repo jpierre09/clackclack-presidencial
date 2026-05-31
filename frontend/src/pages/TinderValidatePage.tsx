@@ -30,6 +30,11 @@ interface TinderStats {
   approved: number;
   corrected: number;
   novelty: number;
+  pending_candidatos?: number;
+  pending_especiales?: number;
+  pending_firmas?: number;
+  pending_recuento?: number;
+  pending_nivelacion?: number;
 }
 
 interface Props {
@@ -39,20 +44,25 @@ interface Props {
 }
 
 const TIPO_LABELS: Record<string, string> = {
+  candidato:     "Candidato",
   formula:       "Candidato",
   nivelacion:    "Nivelación",
-  blancos_nulos: "Especiales",
-  firmas:        "Firmas",
+  blancos_nulos: "Votos Especiales",
+  firmas:        "Firma Jurado",
   recuento:      "Recuento",
 };
 
 const TIPO_COLORS: Record<string, string> = {
+  candidato:     "#22c55e",
   formula:       "#22c55e",
   nivelacion:    "#3b82f6",
   blancos_nulos: "#f59e0b",
   firmas:        "#a855f7",
   recuento:      "#ec4899",
 };
+
+// Campos de firmas y recuento muestran valor SI/NO en vez de número
+const TIPO_BINARIO = new Set(["firmas", "recuento"]);
 
 export function TinderValidatePage({ token, username, onLogout }: Props) {
   const [field, setField]       = useState<FieldItem | null>(null);
@@ -179,11 +189,13 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
         <div className="tv-topbar-left">
           <span className="tv-username">{username}</span>
           {stats && (
-            <span className="tv-pill">
+            <span className="tv-pill" title={
+              stats.pending_candidatos != null
+                ? `Candidatos: ${stats.pending_candidatos} | Especiales: ${stats.pending_especiales} | Firmas: ${stats.pending_firmas} | Recuento: ${stats.pending_recuento}`
+                : ""
+            }>
               <span className="tv-pill-pct">{pct}%</span>
-              {stats.pending > 0
-                ? <>{stats.pending} pendientes</>
-                : "Completado"}
+              {stats.pending > 0 ? <>{stats.pending} pendientes</> : "Completado"}
             </span>
           )}
         </div>
@@ -257,34 +269,60 @@ export function TinderValidatePage({ token, username, onLogout }: Props) {
             {/* ── OCR value ── */}
             <div className="tv-value-section">
               <span className="tv-value-label">
-                {field.ocr_valor != null ? "OCR detectó" : "Ingresa el valor manualmente"}
+                {field.ocr_raw
+                  ? `OCR: ${field.ocr_raw}`
+                  : field.ocr_valor != null ? "OCR detectó" : "Sin valor OCR — ingresa manualmente"}
               </span>
 
               {!editMode ? (
                 <div className="tv-value-row">
-                  <span className="tv-value-num" style={{ color: cardColor }}>
-                    {field.ocr_valor ?? "—"}
-                  </span>
-                  {field.ocr_conf != null && (
-                    <span className="tv-conf-badge">
-                      {field.ocr_conf}% conf.
+                  {TIPO_BINARIO.has(field.tipo) ? (
+                    <span className="tv-value-num" style={{
+                      color: field.ocr_valor === 1 ? "#22c55e"
+                           : field.ocr_valor === 0 ? "#f87171" : "#888"
+                    }}>
+                      {field.ocr_valor === 1 ? "SI — Presente"
+                       : field.ocr_valor === 0 ? "NO — Ausente"
+                       : "Sin dato"}
                     </span>
+                  ) : (
+                    <span className="tv-value-num" style={{ color: cardColor }}>
+                      {field.ocr_valor ?? "—"}
+                    </span>
+                  )}
+                  {field.ocr_conf != null && !TIPO_BINARIO.has(field.tipo) && (
+                    <span className="tv-conf-badge">{field.ocr_conf}% conf.</span>
                   )}
                 </div>
               ) : (
                 <div className="tv-edit-row">
-                  <input
-                    ref={editRef}
-                    type="number" min="0" max="999"
-                    className="tv-input"
-                    value={editVal}
-                    onChange={e => setEditVal(e.target.value)}
-                    onKeyDown={e => {
-                      if (e.key === "Enter")  confirmCorrect();
-                      if (e.key === "Escape") { setEditMode(false); setEditVal(""); setError(""); }
-                    }}
-                    placeholder="0"
-                  />
+                  {TIPO_BINARIO.has(field.tipo) ? (
+                    <div style={{ display: "flex", gap: "0.75rem" }}>
+                      <button type="button" className="tv-btn tv-btn-approve"
+                        style={{ flex: 1 }}
+                        onClick={() => { void submit("corrected", 1); }}>
+                        SI — Presente
+                      </button>
+                      <button type="button" className="tv-btn"
+                        style={{ flex: 1, background: "#7f1d1d", color: "#fff" }}
+                        onClick={() => { void submit("corrected", 0); }}>
+                        NO — Ausente
+                      </button>
+                    </div>
+                  ) : (
+                    <input
+                      ref={editRef}
+                      type="number" min="0" max="999"
+                      className="tv-input"
+                      value={editVal}
+                      onChange={e => setEditVal(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter")  confirmCorrect();
+                        if (e.key === "Escape") { setEditMode(false); setEditVal(""); setError(""); }
+                      }}
+                      placeholder="0"
+                    />
+                  )}
                 </div>
               )}
             </div>

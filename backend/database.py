@@ -54,6 +54,8 @@ _MIGRATIONS = [
     "ALTER TABLE e14_results ADD COLUMN tiene_recuento INTEGER",
     # Encabezado OCR (municipio/zona/puesto/mesa leídos del PDF)
     "ALTER TABLE e14_results ADD COLUMN encabezado_json TEXT",
+    # Prioridad de orden en el Tinder (menor = primero)
+    "ALTER TABLE field_validations ADD COLUMN sort_priority INTEGER DEFAULT 99",
 ]
 
 _SCHEMA_EXTRA = """
@@ -64,14 +66,15 @@ CREATE TABLE IF NOT EXISTS field_validations (
     puesto_cod TEXT NOT NULL,
     mesa INTEGER NOT NULL,
     corporacion TEXT NOT NULL DEFAULT 'PRES',
-    region_id TEXT NOT NULL,       -- id de la region del template (cand_1, niv_e11, etc.)
-    tipo TEXT NOT NULL,            -- candidato | nivelacion | blancos_nulos | firmas | recuento
-    campo_label TEXT NOT NULL,     -- nombre legible (ej: "Candidato 1 - Ivan Cepeda")
-    ocr_valor INTEGER,             -- valor detectado por OCR
-    ocr_raw TEXT,                  -- texto crudo del OCR
-    ocr_conf INTEGER,              -- confianza 0-100
-    validated_valor INTEGER,       -- valor aprobado/corregido por el validador
-    action TEXT,                   -- approved | corrected | novelty | pending
+    region_id TEXT NOT NULL,        -- id de la region del template (cand_1, niv_e11, etc.)
+    tipo TEXT NOT NULL,             -- candidato | nivelacion | blancos_nulos | firmas | recuento
+    campo_label TEXT NOT NULL,      -- nombre legible (ej: "Candidato 1 - Ivan Cepeda")
+    sort_priority INTEGER DEFAULT 99, -- menor = aparece primero en el Tinder
+    ocr_valor INTEGER,              -- valor detectado por OCR
+    ocr_raw TEXT,                   -- texto crudo del OCR
+    ocr_conf INTEGER,               -- confianza 0-100
+    validated_valor INTEGER,        -- valor aprobado/corregido por el validador
+    action TEXT,                    -- approved | corrected | novelty | pending
     novelty_note TEXT,
     validated_by TEXT,
     validated_at TEXT,
@@ -528,8 +531,10 @@ async def insert_result(data: dict) -> int:
             corporacion=data["corporacion"],
             sections_json=data.get("all_sections_json", "[]"),
             ocr_results={
-                "votantes_e11": data.get("votantes_e11"),
-                "votos_urna":   data.get("votos_urna"),
+                "votantes_e11":   data.get("votantes_e11"),
+                "votos_urna":     data.get("votos_urna"),
+                "firmas":         data.get("_firmas_list", []),
+                "tiene_recuento": data.get("_tiene_recuento"),
             },
         )
 
@@ -2149,11 +2154,15 @@ async def seed_field_validations(
 ) -> int:
     """Crea filas pending en field_validations para cada campo del acta.
 
-    Llama esto justo después de insert_result para que el Tinder tenga
-    una fila por cada candidato / nivelacion / blancos-nulos / firmas / recuento.
-    Solo inserta si no existe ya (IGNORE).
+    Campos sembrados (en orden de prioridad para el Tinder):
+      1. Candidatos prioritarios: Cepeda(1), Espriella(4), Valencia(11)
+      2. Votos especiales: blancos, nulos, no marcados, suma total
+      3. Nivelación: E-11, urna
+      4. Firmas jurados 1-6
+      5. Recuento de votos
+      6. Resto de candidatos
 
-    Devuelve la cantidad de filas insertadas.
+    Solo inserta si no existe ya (IGNORE).
     """
     db = await get_db()
     try:
@@ -2164,63 +2173,101 @@ async def seed_field_validations(
     inserted = 0
     now = datetime.now().isoformat()
 
-    for s in sections:
-        tipo = s.get("tipo", "otro")
-        codigo = s.get("codigo", "")
-        nombre = s.get("candidato_presidente") or s.get("nombre", "")
-        partido = s.get("partido", "")
-        total_votos = int(s.get("total_votos", 0) or 0)
+    # Prioridad numérica para el ORDER BY del Tinder
+    # Menor número = aparece primero
+    PRIORITY: dict[str, int] = {
+        # Candidatos prioritarios
+        "cand_1":  10,   # Iván Cepeda Castro
+        "cand_4":  11,   # Abelardo de la Espriella
+        "cand_11": 12,   # Paloma Valencia Laserna
+        # Votos especiales
+        "blancos":      20,
+        "nulos":        21,
+        "no_marcados":  22,
+        "suma_total":   23,
+        # Nivelación
+        "niv_e11":  30,
+        "niv_urna": 31,
+        # Firmas
+        "firma_1": 40,
+        "firma_2": 41,
+        "firma_3": 42,
+        "firma_4": 43,
+        "firma_5": 44,
+        "firma_6": 45,
+        # Recuento
+        "recuento": 50,
+        # Resto de candidatos (se asigna 60 + numero)
+    }
 
-        # region_id debe coincidir con el id del template
-        if tipo == "formula":
-            region_id  = f"cand_{codigo}"
-            campo_label = f"Candidato {codigo} - {nombre[:40]}"
-            if partido:
-                campo_label += f" ({partido[:30]})"
-            ocr_val = total_votos
-        elif tipo == "votos_en_blanco":
-            region_id   = "blancos"
-            campo_label = "Votos en Blanco"
-            ocr_val     = total_votos
-        elif tipo == "votos_nulos":
-            region_id   = "nulos"
-            campo_label = "Votos Nulos"
-            ocr_val     = total_votos
-        elif tipo == "votos_no_marcados":
-            region_id   = "no_marcados"
-            campo_label = "Votos No Marcados"
-            ocr_val     = total_votos
-        else:
-            continue
-
+    async def _insert(region_id: str, tipo: str, label: str,
+                      ocr_val, ocr_raw: str = "", ocr_conf=None):
+        nonlocal inserted
+        priority = PRIORITY.get(region_id, 60 + int(''.join(filter(str.isdigit, region_id)) or '99'))
         await db.execute(
             """INSERT OR IGNORE INTO field_validations
                (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
                 region_id, tipo, campo_label, ocr_valor, ocr_raw, ocr_conf,
-                action, validated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?)""",
+                sort_priority, action, validated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)""",
             (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
-             region_id, tipo, campo_label, ocr_val,
-             str(ocr_val), ocr_results.get(region_id + "_conf"),
-             now),
+             region_id, tipo, label, ocr_val, ocr_raw, ocr_conf,
+             priority, now),
         )
         inserted += 1
 
-    # Nivelacion E-11 y Urna (del resultado principal)
-    for rid, label, key in [
-        ("niv_e11",   "Total Votantes E-11",   "votantes_e11"),
-        ("niv_urna",  "Total Votos en Urna",   "votos_urna"),
-    ]:
-        val = ocr_results.get(key)
-        await db.execute(
-            """INSERT OR IGNORE INTO field_validations
-               (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
-                region_id, tipo, campo_label, ocr_valor, action, validated_at)
-               VALUES (?,?,?,?,?,'{}','nivelacion',?,?,NULL,?)""".format(rid),
-            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
-             label, val, now),
-        )
-        inserted += 1
+    # ── Candidatos ────────────────────────────────────────────────────────
+    for s in sections:
+        tipo = s.get("tipo", "otro")
+        if tipo != "formula":
+            continue
+        codigo   = s.get("codigo", "")
+        nombre   = s.get("candidato_presidente") or s.get("nombre", "")
+        partido  = s.get("partido", "")
+        ocr_val  = int(s.get("total_votos", 0) or 0)
+        rid      = f"cand_{codigo}"
+        label    = f"Candidato {codigo} - {nombre[:40]}"
+        if partido:
+            label += f" ({partido[:28]})"
+        await _insert(rid, "candidato", label, ocr_val, str(ocr_val))
+
+    # ── Votos especiales ──────────────────────────────────────────────────
+    for s in sections:
+        tipo = s.get("tipo", "otro")
+        ocr_val = int(s.get("total_votos", 0) or 0)
+        if tipo == "votos_en_blanco":
+            await _insert("blancos",     "blancos_nulos", "Votos en Blanco",     ocr_val, str(ocr_val))
+        elif tipo == "votos_nulos":
+            await _insert("nulos",       "blancos_nulos", "Votos Nulos",         ocr_val, str(ocr_val))
+        elif tipo == "votos_no_marcados":
+            await _insert("no_marcados", "blancos_nulos", "Votos No Marcados",   ocr_val, str(ocr_val))
+
+    # Suma total (calculada)
+    suma = sum(int(s.get("total_votos", 0) or 0) for s in sections if s.get("tipo") == "formula")
+    suma += sum(int(s.get("total_votos", 0) or 0) for s in sections
+                if s.get("tipo") in ("votos_en_blanco","votos_nulos","votos_no_marcados"))
+    await _insert("suma_total", "blancos_nulos", "Suma Total (candidatos+especiales)", suma, str(suma))
+
+    # ── Nivelación ────────────────────────────────────────────────────────
+    await _insert("niv_e11",  "nivelacion", "Total Votantes E-11",
+                  ocr_results.get("votantes_e11"), str(ocr_results.get("votantes_e11") or ""))
+    await _insert("niv_urna", "nivelacion", "Total Votos en Urna",
+                  ocr_results.get("votos_urna"),   str(ocr_results.get("votos_urna") or ""))
+
+    # ── Firmas de jurados (1-6) ───────────────────────────────────────────
+    firmas_list = ocr_results.get("firmas", [])
+    for i in range(1, 7):
+        presente = bool(firmas_list[i-1]) if i <= len(firmas_list) else None
+        ocr_val_firma = 1 if presente else 0
+        raw_firma = "PRESENTE" if presente else ("AUSENTE" if presente is not None else "")
+        await _insert(f"firma_{i}", "firmas",
+                      f"Firma Jurado {i}", ocr_val_firma, raw_firma)
+
+    # ── Recuento ──────────────────────────────────────────────────────────
+    recuento = ocr_results.get("tiene_recuento")
+    recuento_val = 1 if recuento else (0 if recuento is False else None)
+    recuento_raw = "SI" if recuento else ("NO" if recuento is False else "")
+    await _insert("recuento", "recuento", "Hubo recuento de votos", recuento_val, recuento_raw)
 
     await db.commit()
     return inserted
@@ -2259,7 +2306,10 @@ async def get_next_field_to_validate(username: str) -> dict | None:
             AND r.mesa         = fv.mesa
             AND r.corporacion  = fv.corporacion
         WHERE (fv.action IS NULL OR fv.action = 'pending')
-        ORDER BY fv.municipio_cod, fv.mesa, fv.region_id
+        ORDER BY
+            fv.sort_priority ASC,       -- 1=Cepeda, 4=Espriella, 11=Valencia, 20-23=especiales...
+            fv.municipio_cod ASC,
+            fv.mesa ASC
         LIMIT 1
     """)
 
@@ -2319,24 +2369,34 @@ async def submit_field_validation(
 
 
 async def get_field_validation_stats() -> dict:
-    """Estadísticas del Tinder de validación por campo."""
+    """Estadísticas del Tinder de validación por campo, desglosadas por tipo."""
     db = await get_db()
     rows = await db.execute_fetchall("""
         SELECT
             COUNT(*) AS total,
             SUM(CASE WHEN action IS NULL OR action='pending' THEN 1 ELSE 0 END) AS pending,
-            SUM(CASE WHEN action='approved' THEN 1 ELSE 0 END)  AS approved,
+            SUM(CASE WHEN action='approved'  THEN 1 ELSE 0 END) AS approved,
             SUM(CASE WHEN action='corrected' THEN 1 ELSE 0 END) AS corrected,
-            SUM(CASE WHEN action='novelty'   THEN 1 ELSE 0 END) AS novelty
+            SUM(CASE WHEN action='novelty'   THEN 1 ELSE 0 END) AS novelty,
+            SUM(CASE WHEN tipo='candidato'    AND (action IS NULL OR action='pending') THEN 1 ELSE 0 END) AS pending_candidatos,
+            SUM(CASE WHEN tipo='blancos_nulos' AND (action IS NULL OR action='pending') THEN 1 ELSE 0 END) AS pending_especiales,
+            SUM(CASE WHEN tipo='firmas'        AND (action IS NULL OR action='pending') THEN 1 ELSE 0 END) AS pending_firmas,
+            SUM(CASE WHEN tipo='recuento'      AND (action IS NULL OR action='pending') THEN 1 ELSE 0 END) AS pending_recuento,
+            SUM(CASE WHEN tipo='nivelacion'    AND (action IS NULL OR action='pending') THEN 1 ELSE 0 END) AS pending_nivelacion
         FROM field_validations
     """)
     r = dict(rows[0]) if rows else {}
     return {
-        "total":     int(r.get("total",     0) or 0),
-        "pending":   int(r.get("pending",   0) or 0),
-        "approved":  int(r.get("approved",  0) or 0),
-        "corrected": int(r.get("corrected", 0) or 0),
-        "novelty":   int(r.get("novelty",   0) or 0),
+        "total":               int(r.get("total",               0) or 0),
+        "pending":             int(r.get("pending",             0) or 0),
+        "approved":            int(r.get("approved",            0) or 0),
+        "corrected":           int(r.get("corrected",           0) or 0),
+        "novelty":             int(r.get("novelty",             0) or 0),
+        "pending_candidatos":  int(r.get("pending_candidatos",  0) or 0),
+        "pending_especiales":  int(r.get("pending_especiales",  0) or 0),
+        "pending_firmas":      int(r.get("pending_firmas",      0) or 0),
+        "pending_recuento":    int(r.get("pending_recuento",    0) or 0),
+        "pending_nivelacion":  int(r.get("pending_nivelacion",  0) or 0),
     }
 
 
