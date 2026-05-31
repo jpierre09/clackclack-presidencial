@@ -2,12 +2,16 @@ import type {
   AlertItem,
   AlertReviewDecision,
   AlertReviewItem,
-  CamaraLiveResponse,
+  AlertReviewSummary,
+  PresLiveResponse,
   DashboardSummary,
   MapItem,
+  MunicipioOption,
   MunicipioNode,
   NovedadItem,
   ProgressData,
+  PublicExportMunicipioOption,
+  PublicMunicipioPdfExportResponse,
   ReclamationRequest,
   UserSettings,
   ValidationResponse,
@@ -43,12 +47,16 @@ export async function getHierarchy(municipio?: string): Promise<MunicipioNode[]>
   return fetchJson<MunicipioNode[]>(`/api/dashboard/hierarchy${query}`);
 }
 
+export async function getMunicipios(): Promise<MunicipioOption[]> {
+  return fetchJson<MunicipioOption[]>("/api/dashboard/municipios");
+}
+
 export async function getMapData(): Promise<MapItem[]> {
   return fetchJson<MapItem[]>("/api/dashboard/map");
 }
 
-export async function getCamaraLive(): Promise<CamaraLiveResponse> {
-  return fetchJson<CamaraLiveResponse>("/api/dashboard/camara-live");
+export async function getPresLive(): Promise<PresLiveResponse> {
+  return fetchJson<PresLiveResponse>("/api/dashboard/pres-live");
 }
 
 export async function getAlerts(resolved = false): Promise<AlertItem[]> {
@@ -66,6 +74,13 @@ export async function getAlertReviewItems(
   return fetchJson<AlertReviewItem[]>(`/api/alerts/review-items?${params}`);
 }
 
+export async function getAlertReviewSummary(municipio?: string): Promise<AlertReviewSummary> {
+  const params = new URLSearchParams();
+  if (municipio) params.set("municipio", municipio);
+  const query = params.toString();
+  return fetchJson<AlertReviewSummary>(`/api/alerts/review-summary${query ? `?${query}` : ""}`);
+}
+
 export async function reviewAlert(
   alertId: number,
   decision: AlertReviewDecision,
@@ -79,13 +94,12 @@ export async function reviewAlert(
 
 export async function correctAlertVotes(
   alertId: number,
-  corp: "SEN" | "CAM",
   votes: number,
   reviewedBy = "dashboard"
 ): Promise<void> {
   await fetchJson(`/api/alerts/${alertId}/correct-votes`, {
     method: "PUT",
-    body: JSON.stringify({ corp, votes, reviewed_by: reviewedBy }),
+    body: JSON.stringify({ votes, reviewed_by: reviewedBy }),
   });
 }
 
@@ -102,10 +116,9 @@ export async function getValidation(
   zona: string,
   puesto: string,
   mesa: number,
-  corp: "SEN" | "CAM"
 ): Promise<ValidationResponse> {
   return fetchJson<ValidationResponse>(
-    `/api/validation/mesa/${mun}/${zona}/${puesto}/${mesa}/${corp}`
+    `/api/validation/mesa/${mun}/${zona}/${puesto}/${mesa}/PRES`
   );
 }
 
@@ -114,7 +127,6 @@ export async function correctValidation(
   zona: string,
   puesto: string,
   mesa: number,
-  corp: "SEN" | "CAM",
   payload: {
     ph_votos_lista?: number;
     ph_total_votos?: number;
@@ -122,7 +134,7 @@ export async function correctValidation(
     votos_urna?: number;
   }
 ): Promise<void> {
-  await fetchJson(`/api/validation/mesa/${mun}/${zona}/${puesto}/${mesa}/${corp}`, {
+  await fetchJson(`/api/validation/mesa/${mun}/${zona}/${puesto}/${mesa}/PRES`, {
     method: "PUT",
     body: JSON.stringify(payload),
   });
@@ -160,6 +172,27 @@ export async function generateReclamation(req: ReclamationRequest): Promise<void
   URL.revokeObjectURL(url);
 }
 
+export async function getPublicExportMunicipios(
+  shareToken: string
+): Promise<PublicExportMunicipioOption[]> {
+  return fetchJson<PublicExportMunicipioOption[]>(
+    `/api/validar/public-exports/share/${encodeURIComponent(shareToken)}/municipios`
+  );
+}
+
+export async function generateMunicipioPdfExport(
+  shareToken: string,
+  municipioCod: string
+): Promise<PublicMunicipioPdfExportResponse> {
+  return fetchJson<PublicMunicipioPdfExportResponse>(
+    `/api/validar/public-exports/share/${encodeURIComponent(shareToken)}/generate-municipio`,
+    {
+    method: "POST",
+    body: JSON.stringify({ municipio_cod: municipioCod }),
+    }
+  );
+}
+
 export async function getUserSettings(): Promise<UserSettings> {
   return fetchJson<UserSettings>("/api/settings/user");
 }
@@ -189,6 +222,17 @@ export async function resolveNovedad(
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || `${res.status}`);
   }
+}
+
+export async function purgeBadScanNovedades(adminToken: string): Promise<{ deleted: number; deleted_files: number; message: string }> {
+  const res = await fetch(withBase("/api/validar/admin/novedades/purge-bad-scan"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ admin_token: adminToken }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.detail || `${res.status}`);
+  return data;
 }
 
 export async function getProgress(): Promise<ProgressData> {

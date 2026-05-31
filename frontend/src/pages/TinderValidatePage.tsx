@@ -1,35 +1,36 @@
+/**
+ * TinderValidatePage — Validación campo a campo del E-14 presidencial.
+ * Un campo por pantalla: pantallazo + valor OCR + aprobar / corregir / novedad.
+ * Teclado: → Aprobar | ← Corregir | F2 Novedad | Escape Cancelar
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSSE } from "../hooks/useSSE";
 
-interface ValidateItem {
+interface FieldItem {
+  id: number;
   municipio_cod: string;
   zona_cod: string;
   puesto_cod: string;
   mesa: number;
   corporacion: string;
-  ph_total_votos: number | null;
-  ph_votos_lista: number | null;
-  votos_urna: number | null;
-  ocr_confidence: number | null;
-  result_status: string | null;
-  needs_manual_votes: boolean;
+  region_id: string;
+  tipo: string;
+  campo_label: string;
+  ocr_valor: number | null;
+  ocr_raw: string | null;
+  ocr_conf: number | null;
+  filepath: string;
   municipio: string | null;
   puesto_nombre: string | null;
-  processed_at: string | null;
-  screenshot_url: string;
 }
 
-interface Stats {
-  total_processed: number;
-  total_queue_items: number;
-  total_validated: number;
+interface TinderStats {
+  total: number;
   pending: number;
-  pending_without_ocr: number;
-  total_corrected: number;
-  total_novelty: number;
+  approved: number;
+  corrected: number;
+  novelty: number;
 }
-
-type SwipeDir = "right" | "left" | null;
 
 interface Props {
   token: string;
@@ -37,417 +38,336 @@ interface Props {
   onLogout: () => void;
 }
 
+const TIPO_LABELS: Record<string, string> = {
+  formula:       "Candidato",
+  nivelacion:    "Nivelación",
+  blancos_nulos: "Especiales",
+  firmas:        "Firmas",
+  recuento:      "Recuento",
+};
+
+const TIPO_COLORS: Record<string, string> = {
+  formula:       "#22c55e",
+  nivelacion:    "#3b82f6",
+  blancos_nulos: "#f59e0b",
+  firmas:        "#a855f7",
+  recuento:      "#ec4899",
+};
+
 export function TinderValidatePage({ token, username, onLogout }: Props) {
-  const [item, setItem] = useState<ValidateItem | null>(null);
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [swipe, setSwipe] = useState<SwipeDir>(null);
-
+  const [field, setField]       = useState<FieldItem | null>(null);
+  const [done, setDone]         = useState(false);
+  const [loading, setLoading]   = useState(true);
+  const [stats, setStats]       = useState<TinderStats | null>(null);
   const [editMode, setEditMode] = useState(false);
-  const [editValue, setEditValue] = useState("");
-
-  const [noveltyOpen, setNoveltyOpen] = useState(false);
+  const [editVal, setEditVal]   = useState("");
+  const [noveltyMode, setNoveltyMode] = useState(false);
   const [noveltyText, setNoveltyText] = useState("");
-  const [canUndo, setCanUndo] = useState(false);
-
-  const editRef = useRef<HTMLInputElement>(null);
+  const [saving, setSaving]     = useState(false);
+  const [error, setError]       = useState("");
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const [imgKey, setImgKey]     = useState(0);
+  const editRef    = useRef<HTMLInputElement>(null);
   const noveltyRef = useRef<HTMLTextAreaElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const fetchNext = useCallback(async () => {
-    setLoading(true);
-    setSwipe(null);
-    setEditMode(false);
-    setEditValue("");
+  const H = { "X-Session-Token": token };
+
+  const loadStats = useCallback(async () => {
     try {
-      const res = await fetch("/api/validar/queue/next", {
-        headers: { "X-Session-Token": token, "Content-Type": "application/json" },
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      const data = await res.json();
-      setItem(data.item);
-      setStats(data.stats);
-      if (data.item?.needs_manual_votes) {
-        setEditMode(true);
-        setEditValue("");
-      }
-      if (data.prefetch_url) {
-        const img = new Image();
-        img.onerror = () => {};
-        img.src = data.prefetch_url;
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [onLogout, token]);
+      const r = await fetch("/api/validar/tinder/stats", { headers: H });
+      if (r.ok) setStats(await r.json());
+    } catch { /* ignore */ }
+  }, [token]);
 
-  async function undoLast() {
+  const loadNext = useCallback(async () => {
     setLoading(true);
-    setSwipe(null);
+    setError("");
     setEditMode(false);
-    setEditValue("");
-    try {
-      const res = await fetch("/api/validar/undo", {
-        method: "POST",
-        headers: { "X-Session-Token": token, "Content-Type": "application/json" },
-      });
-      if (res.status === 401) {
-        onLogout();
-        return;
-      }
-      const data = await res.json();
-      setItem(data.item);
-      setStats(data.stats);
-      setCanUndo(false);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void fetchNext();
-  }, [fetchNext]);
-
-  const queueEmpty = !loading && !item;
-  useSSE(
-    useCallback(
-      (event) => {
-        if (queueEmpty && event.type === "ocr_complete") {
-          void fetchNext();
-        }
-      },
-      [queueEmpty, fetchNext]
-    )
-  );
-
-  useEffect(() => {
-    if (!queueEmpty) {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-      return;
-    }
-    pollRef.current = setInterval(() => {
-      void fetchNext();
-    }, 30000);
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [queueEmpty, fetchNext]);
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement).tagName;
-      const inInput = tag === "INPUT" || tag === "TEXTAREA";
-
-      if (e.key === "Escape") {
-        setEditMode(false);
-        setNoveltyOpen(false);
-        setNoveltyText("");
-        return;
-      }
-      if (noveltyOpen) {
-        return;
-      }
-      if (editMode) {
-        if (e.key === "Enter" && !inInput) {
-          void submitCorrection();
-        }
-        return;
-      }
-      if (!item) {
-        return;
-      }
-
-      if (e.key === "ArrowRight" && !item.needs_manual_votes) {
-        void approve();
-      } else if (e.key === "ArrowLeft") {
-        openEdit();
-      } else if (e.key === "F2" || e.key === "`") {
-        e.preventDefault();
-        setNoveltyOpen(true);
-        setTimeout(() => noveltyRef.current?.focus(), 50);
-      }
-    }
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [editMode, item, noveltyOpen]);
-
-  function openEdit() {
-    if (!item) {
-      return;
-    }
-    setEditMode(true);
-    setEditValue(item.needs_manual_votes ? "" : String(item.ph_total_votos ?? ""));
-    setTimeout(() => editRef.current?.focus(), 50);
-  }
-
-  async function approve() {
-    if (!item || item.needs_manual_votes || swipe) {
-      return;
-    }
-    setSwipe("right");
-    await fetch("/api/validar/submit", {
-      method: "POST",
-      headers: { "X-Session-Token": token, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        municipio_cod: item.municipio_cod,
-        zona_cod: item.zona_cod,
-        puesto_cod: item.puesto_cod,
-        mesa: item.mesa,
-        corporacion: item.corporacion,
-        action: "approved",
-      }),
-    });
-    setCanUndo(true);
-    setTimeout(() => {
-      void fetchNext();
-    }, 350);
-  }
-
-  async function submitCorrection() {
-    if (!item || swipe) {
-      return;
-    }
-    const val = parseInt(editValue, 10);
-    if (Number.isNaN(val) || val < 0) {
-      return;
-    }
-    setEditMode(false);
-    setSwipe("left");
-    await fetch("/api/validar/submit", {
-      method: "POST",
-      headers: { "X-Session-Token": token, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        municipio_cod: item.municipio_cod,
-        zona_cod: item.zona_cod,
-        puesto_cod: item.puesto_cod,
-        mesa: item.mesa,
-        corporacion: item.corporacion,
-        action: "corrected",
-        corrected_ph_votes: val,
-      }),
-    });
-    setCanUndo(true);
-    setTimeout(() => {
-      void fetchNext();
-    }, 350);
-  }
-
-  async function submitNovelty() {
-    if (!item || !noveltyText.trim()) {
-      return;
-    }
-    await fetch("/api/validar/novelty", {
-      method: "POST",
-      headers: { "X-Session-Token": token, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        municipio_cod: item.municipio_cod,
-        zona_cod: item.zona_cod,
-        puesto_cod: item.puesto_cod,
-        mesa: item.mesa,
-        corporacion: item.corporacion,
-        note: noveltyText.trim(),
-      }),
-    });
-    setNoveltyOpen(false);
+    setEditVal("");
+    setNoveltyMode(false);
     setNoveltyText("");
-    void fetchNext();
-  }
+    setImgLoaded(false);
+    try {
+      const r = await fetch("/api/validar/tinder/next", { headers: H });
+      if (r.status === 401) { onLogout(); return; }
+      const data = await r.json();
+      if (data.done) { setDone(true); setField(null); }
+      else {
+        setField(data.field as FieldItem);
+        setDone(false);
+        setImgKey(k => k + 1);
+        if (data.field.ocr_valor === null || data.field.ocr_valor === undefined) {
+          setEditMode(true);
+          setTimeout(() => editRef.current?.focus(), 80);
+        }
+      }
+    } catch { setError("Error cargando el siguiente campo."); }
+    finally { setLoading(false); void loadStats(); }
+  }, [token, onLogout, loadStats]);
 
-  const cardClass = `tinder-card${swipe === "right" ? " swipe-right" : swipe === "left" ? " swipe-left" : ""}`;
-  const itemHint = item?.needs_manual_votes
-    ? "Ingresa el valor manual | F2 Novedad"
-    : "<- Corregir | -> Aprobar | F2 Novedad";
+  const submit = useCallback(async (
+    action: "approved" | "corrected" | "novelty",
+    val?: number | null,
+    note?: string
+  ) => {
+    if (!field || saving) return;
+    setSaving(true); setError("");
+    try {
+      const body: Record<string, unknown> = {
+        municipio_cod: field.municipio_cod, zona_cod: field.zona_cod,
+        puesto_cod: field.puesto_cod, mesa: field.mesa,
+        corporacion: field.corporacion, region_id: field.region_id,
+        action, validated_valor: val ?? null, novelty_note: note ?? null,
+      };
+      const r = await fetch("/api/validar/tinder/submit", {
+        method: "POST",
+        headers: { ...H, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) { const d = await r.json().catch(() => ({})); setError(d.detail || "Error al guardar."); setSaving(false); return; }
+    } catch { setError("Error de conexion."); setSaving(false); return; }
+    setSaving(false);
+    void loadNext();
+  }, [field, saving, token, loadNext]);
 
+  const approve      = useCallback(() => { if (field && !editMode && !noveltyMode) void submit("approved"); }, [field, editMode, noveltyMode, submit]);
+  const startCorrect = useCallback(() => { setEditMode(true); setEditVal(field?.ocr_valor != null ? String(field.ocr_valor) : ""); setTimeout(() => editRef.current?.focus(), 60); }, [field]);
+  const confirmCorrect = useCallback(() => {
+    const v = parseInt(editVal, 10);
+    if (isNaN(v) || v < 0) { setError("Ingresa un número válido (0 o más)."); return; }
+    void submit("corrected", v);
+  }, [editVal, submit]);
+  const openNovelty    = useCallback(() => { setNoveltyMode(true); setTimeout(() => noveltyRef.current?.focus(), 60); }, []);
+  const confirmNovelty = useCallback(() => {
+    if (!noveltyText.trim()) { setError("Escribe la descripción de la novedad."); return; }
+    void submit("novelty", null, noveltyText.trim());
+  }, [noveltyText, submit]);
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (noveltyMode) { if (e.key === "Escape") { setNoveltyMode(false); setNoveltyText(""); } return; }
+      if (editMode)    { if (e.key === "Enter") confirmCorrect(); if (e.key === "Escape") { setEditMode(false); setEditVal(""); } return; }
+      if (e.key === "ArrowRight") approve();
+      if (e.key === "ArrowLeft")  startCorrect();
+      if (e.key === "F2" || e.key === "`") openNovelty();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [editMode, noveltyMode, approve, startCorrect, confirmCorrect, openNovelty]);
+
+  useSSE((ev) => {
+    if (ev.type === "ocr_complete") { void loadStats(); if (done) void loadNext(); }
+  });
+
+  useEffect(() => { void loadNext(); }, []); // eslint-disable-line
+
+  // ── Derivados ──────────────────────────────────────────────────────────────
+  // imgKey changes on every new field — forces browser to fetch fresh (no cache)
+  const screenshotUrl = field
+    ? `/api/validar/tinder/screenshot/${field.municipio_cod}/${field.zona_cod}/${field.puesto_cod}/${field.mesa}/${field.region_id}?v=${imgKey}`
+    : null;
+  const cardColor    = field ? (TIPO_COLORS[field.tipo] ?? "#6b7280") : "#22c55e";
+  const tipoLabel    = field ? (TIPO_LABELS[field.tipo] ?? field.tipo) : "";
+  const pct          = stats && stats.total > 0 ? Math.round((stats.total - stats.pending) / stats.total * 100) : 0;
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="tinder-root">
-      <header className="tinder-header">
-        <span className="tinder-user">{username}</span>
-        {stats && (
-          <span className="tinder-progress">
-            {stats.total_validated} / {stats.total_queue_items} validadas
-            {stats.pending_without_ocr > 0 && ` | ${stats.pending_without_ocr} sin OCR`}
-            {stats.pending > 0 && ` | ${stats.pending} pendientes`}
-          </span>
-        )}
-        <button className="tinder-logout" onClick={onLogout}>
-          Salir
-        </button>
-      </header>
+    <div className="tv-root">
 
-      <main className="tinder-main">
-        {loading && <p className="tinder-loading">Cargando...</p>}
+      {/* ── Top bar ── */}
+      <div className="tv-topbar">
+        <div className="tv-topbar-left">
+          <span className="tv-username">{username}</span>
+          {stats && (
+            <span className="tv-pill">
+              <span className="tv-pill-pct">{pct}%</span>
+              {stats.pending > 0
+                ? <>{stats.pending} pendientes</>
+                : "Completado"}
+            </span>
+          )}
+        </div>
+        <button type="button" className="tv-logout" onClick={onLogout}>Salir</button>
+      </div>
 
-        {!loading && !item && (
-          <div className="tinder-done">
-            <p className="tinder-waiting-dot">Esperando nuevos E14...</p>
-            {stats && (
-              <p className="tinder-done-stats">
-                {stats.total_validated} validadas | {stats.total_corrected} corregidas | {stats.total_novelty} novedades
-              </p>
-            )}
-            <p className="tinder-hint">La cola se refresca cuando entren nuevos items.</p>
-            {canUndo && (
-              <button className="tinder-undo-btn" onClick={undoLast}>
-                Deshacer ultima validacion
-              </button>
-            )}
+      {/* ── Progress bar ── */}
+      <div className="tv-progress-track">
+        <div className="tv-progress-fill" style={{ width: `${pct}%`, background: cardColor }} />
+      </div>
+
+      {/* ── Body ── */}
+      <div className="tv-body">
+
+        {loading && (
+          <div className="tv-state-card">
+            <div className="tv-spinner" />
+            <p>Cargando...</p>
           </div>
         )}
 
-        {!loading && item && (
-          <>
-            <div className={cardClass}>
-              <div className="tinder-location">
-                <span className="tinder-corp">{item.corporacion}</span>
-                <span className="tinder-mesa">Mesa {item.mesa}</span>
-                <div className="tinder-loc-detail">
-                  {item.municipio && <span>{item.municipio}</span>}
-                  {item.puesto_nombre && <span> | {item.puesto_nombre}</span>}
-                  <span> | Zona {item.zona_cod} | Puesto {item.puesto_cod}</span>
-                </div>
-              </div>
+        {!loading && done && (
+          <div className="tv-state-card">
+            <div className="tv-done-check">✓</div>
+            <h2>Todo al día</h2>
+            <p className="tv-state-sub">No hay campos pendientes de validación.</p>
+            <button type="button" className="tv-btn tv-btn-approve" onClick={() => void loadNext()}>
+              Verificar de nuevo
+            </button>
+          </div>
+        )}
 
-              <div className="tinder-img-wrap">
+        {!loading && !done && field && (
+          <div className="tv-card" style={{ "--card-color": cardColor } as React.CSSProperties}>
+
+            {/* ── Mesa badge ── */}
+            <div className="tv-card-header">
+              <span className="tv-badge" style={{ background: cardColor }}>
+                {tipoLabel}
+              </span>
+              <span className="tv-mesa-num">Mesa {field.mesa}</span>
+              <span className="tv-location">
+                {field.municipio ?? field.municipio_cod}
+                {field.puesto_nombre ? ` · ${field.puesto_nombre}` : ""}
+                {` · Z${field.zona_cod}`}
+              </span>
+            </div>
+
+            {/* ── Campo name ── */}
+            <div className="tv-campo-name" style={{ color: cardColor }}>
+              {field.campo_label}
+            </div>
+
+            {/* ── Screenshot ── */}
+            <div className="tv-img-area">
+              {screenshotUrl && !imgLoaded && (
+                <div className="tv-img-skeleton" />
+              )}
+              {screenshotUrl && (
                 <img
-                  key={`${item.municipio_cod}-${item.zona_cod}-${item.puesto_cod}-${item.mesa}-${item.corporacion}`}
-                  src={item.screenshot_url}
-                  alt="Area votos Pacto Historico"
-                  className="tinder-img"
+                  key={imgKey}
+                  src={screenshotUrl}
+                  alt={field.campo_label}
+                  className="tv-img"
+                  style={{ opacity: imgLoaded ? 1 : 0 }}
+                  onLoad={() => setImgLoaded(true)}
                 />
-              </div>
+              )}
+            </div>
 
-              <div className="tinder-value">
-                <span className="tinder-value-label">
-                  {item.needs_manual_votes ? "Captura manual requerida" : "IA detecto"}
-                </span>
-                <span className="tinder-value-number">{item.ph_total_votos ?? "-"}</span>
-                <span className="tinder-value-sublabel">
-                  {item.needs_manual_votes ? "Ingresa el total de votos Pacto Historico" : "votos Pacto Historico"}
-                </span>
-                {item.needs_manual_votes ? (
-                  <span className="tinder-conf">Sin OCR usable</span>
-                ) : item.ocr_confidence != null ? (
-                  <span className="tinder-conf">{item.ocr_confidence.toFixed(0)}% conf.</span>
-                ) : null}
-              </div>
+            {/* ── OCR value ── */}
+            <div className="tv-value-section">
+              <span className="tv-value-label">
+                {field.ocr_valor != null ? "OCR detectó" : "Ingresa el valor manualmente"}
+              </span>
 
-              {editMode && (
-                <div className="tinder-edit">
-                  <label className="tinder-edit-label">Valor correcto:</label>
+              {!editMode ? (
+                <div className="tv-value-row">
+                  <span className="tv-value-num" style={{ color: cardColor }}>
+                    {field.ocr_valor ?? "—"}
+                  </span>
+                  {field.ocr_conf != null && (
+                    <span className="tv-conf-badge">
+                      {field.ocr_conf}% conf.
+                    </span>
+                  )}
+                </div>
+              ) : (
+                <div className="tv-edit-row">
                   <input
                     ref={editRef}
-                    className="tinder-edit-input"
-                    type="number"
-                    min="0"
-                    value={editValue}
-                    onChange={(e) => setEditValue(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        void submitCorrection();
-                      }
-                      if (e.key === "Escape") {
-                        setEditMode(false);
-                      }
+                    type="number" min="0" max="999"
+                    className="tv-input"
+                    value={editVal}
+                    onChange={e => setEditVal(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter")  confirmCorrect();
+                      if (e.key === "Escape") { setEditMode(false); setEditVal(""); setError(""); }
                     }}
+                    placeholder="0"
                   />
-                  <button className="tinder-btn correct" onClick={submitCorrection} disabled={editValue === ""}>
-                    Confirmar
-                  </button>
                 </div>
               )}
-
-              {swipe === "right" && <div className="swipe-overlay approve-overlay">APROBADO</div>}
-              {swipe === "left" && <div className="swipe-overlay correct-overlay">CORREGIDO</div>}
             </div>
 
-            {!editMode && (
-              <div className="tinder-actions">
-                {canUndo && (
-                  <button className="tinder-undo-btn tinder-undo-btn--inline" onClick={undoLast} title="Deshacer">
-                    Undo
-                  </button>
-                )}
-                <button className="tinder-btn reject" onClick={openEdit} title="Corregir">
-                  {item.needs_manual_votes ? "Ingresar valor" : "<- Corregir"}
-                </button>
-                <button
-                  className="tinder-btn novelty"
-                  onClick={() => {
-                    setNoveltyOpen(true);
-                    setTimeout(() => noveltyRef.current?.focus(), 50);
-                  }}
-                  title="F2"
-                >
-                  Novedad [F2]
-                </button>
-                {!item.needs_manual_votes && (
-                  <button className="tinder-btn approve" onClick={approve} title="Aprobar">
-                    {"Aprobar ->"}
-                  </button>
+            {error && <p className="tv-error">{error}</p>}
+
+            {/* ── Novelty modal ── */}
+            {noveltyMode && (
+              <div className="tv-overlay" onClick={() => { setNoveltyMode(false); setNoveltyText(""); }}>
+                <div className="tv-novelty-box" onClick={e => e.stopPropagation()}>
+                  <h3>Reportar novedad</h3>
+                  <p className="tv-novelty-ctx">
+                    {field.campo_label} · Mesa {field.mesa} · {field.municipio ?? field.municipio_cod}
+                  </p>
+                  <textarea
+                    ref={noveltyRef}
+                    className="tv-novelty-input"
+                    rows={3}
+                    value={noveltyText}
+                    onChange={e => setNoveltyText(e.target.value)}
+                    placeholder="Describe la irregularidad (ej: firma faltante, tachón en casilla, valor ilegible...)"
+                    onKeyDown={e => { if (e.key === "Escape") { setNoveltyMode(false); setNoveltyText(""); } }}
+                  />
+                  <div className="tv-novelty-actions">
+                    <button type="button" className="tv-btn tv-btn-ghost"
+                      onClick={() => { setNoveltyMode(false); setNoveltyText(""); }}>
+                      Cancelar
+                    </button>
+                    <button type="button" className="tv-btn tv-btn-novelty"
+                      onClick={confirmNovelty}
+                      disabled={saving || !noveltyText.trim()}>
+                      {saving ? "Guardando..." : "Reportar novedad"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Action buttons ── */}
+            {!noveltyMode && (
+              <div className="tv-actions">
+                {!editMode ? (
+                  <>
+                    <button type="button" className="tv-btn tv-btn-correct"
+                      onClick={startCorrect} disabled={saving} title="Corregir (←)">
+                      ✎ Corregir
+                    </button>
+                    <button type="button" className="tv-btn tv-btn-novelty"
+                      onClick={openNovelty} disabled={saving} title="Novedad (F2)">
+                      ⚑ Novedad
+                    </button>
+                    {field.ocr_valor != null && (
+                      <button type="button" className="tv-btn tv-btn-approve"
+                        onClick={approve} disabled={saving} title="Aprobar (→)">
+                        {saving ? "..." : "✓ Aprobar"}
+                      </button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <button type="button" className="tv-btn tv-btn-ghost"
+                      onClick={() => { setEditMode(false); setEditVal(""); setError(""); }}>
+                      Cancelar
+                    </button>
+                    <button type="button" className="tv-btn tv-btn-approve"
+                      onClick={confirmCorrect}
+                      disabled={saving || editVal === ""}>
+                      {saving ? "Guardando..." : "Guardar"}
+                    </button>
+                  </>
                 )}
               </div>
             )}
 
-            <p className="tinder-hint">{itemHint}</p>
-          </>
-        )}
-      </main>
-
-      {noveltyOpen && (
-        <div
-          className="tinder-modal-overlay"
-          onClick={() => {
-            setNoveltyOpen(false);
-            setNoveltyText("");
-          }}
-        >
-          <div className="tinder-modal" onClick={(e) => e.stopPropagation()}>
-            <h2 className="tinder-modal-title">Reporte de Novedad</h2>
-            {item && (
-              <p className="tinder-modal-ref">
-                {item.corporacion} | Mesa {item.mesa} | {item.municipio}
-              </p>
+            {/* ── Keyboard hint ── */}
+            {!editMode && !noveltyMode && (
+              <div className="tv-hint">
+                <kbd>→</kbd> Aprobar &nbsp; <kbd>←</kbd> Corregir &nbsp; <kbd>F2</kbd> Novedad
+              </div>
             )}
-            <textarea
-              ref={noveltyRef}
-              className="tinder-modal-text"
-              placeholder="Describe la novedad observada..."
-              value={noveltyText}
-              onChange={(e) => setNoveltyText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void submitNovelty();
-                }
-              }}
-              rows={5}
-            />
-            <div className="tinder-modal-actions">
-              <button
-                className="tinder-btn"
-                onClick={() => {
-                  setNoveltyOpen(false);
-                  setNoveltyText("");
-                }}
-              >
-                Cancelar
-              </button>
-              <button className="tinder-btn approve" onClick={submitNovelty} disabled={!noveltyText.trim()}>
-                Enviar (Enter)
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

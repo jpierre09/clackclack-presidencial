@@ -41,12 +41,23 @@ async def get_summary():
     return await _cached("summary", 30, db.get_dashboard_summary)
 
 
+@router.get("/municipios")
+async def get_municipios():
+    return await _cached("municipios", 300, db.get_municipio_options)
+
+
 @router.get("/hierarchy")
 async def get_hierarchy(municipio: str = None):
-    data = await _cached("hierarchy", 60, db.get_hierarchy)
     if municipio:
-        data = [m for m in data if m["municipio_cod"] == municipio]
-    return data
+        return await _cached(f"hierarchy:{municipio}", 60, lambda: db.get_hierarchy(municipio))
+    # Sin municipio: solo devuelve los que tienen alertas activas (mas rapido)
+    return await _cached("hierarchy_alerts_only", 30, db.get_hierarchy_with_alerts)
+
+
+@router.get("/hierarchy-all")
+async def get_hierarchy_all():
+    """Full hierarchy — all municipalities (slow, use only when needed)."""
+    return await _cached("hierarchy", 60, db.get_hierarchy)
 
 
 @router.get("/mesa/{mun}/{zona}/{puesto}/{mesa}")
@@ -59,13 +70,29 @@ async def get_map_data():
     return await _cached("map", 60, db.get_map_data)
 
 
-@router.get("/camara-live")
-async def get_camara_live():
-    return await _cached("camara_live", 30, db.get_camara_live_projection)
+@router.get("/pres-live")
+async def get_pres_live():
+    return await _cached("pres_live", 30, db.get_pres_live_projection)
+
+
+@router.get("/coverage")
+async def get_coverage(municipio: str = None):
+    """Mesas esperadas (DIVIPOL) vs descargadas vs procesadas vs validadas por municipio."""
+    return await _cached(
+        f"coverage:{municipio or 'ALL'}",
+        60,
+        lambda: db.get_coverage_report(municipio),
+    )
 
 
 @router.post("/invalidate-cache")
 async def invalidate_cache():
-    """Force-clear all cached dashboard data."""
+    """Force-clear all cached dashboard data and screenshot cache."""
     _cache.clear()
+    # Also clear screenshot cache in manual_validate
+    try:
+        from backend.routers.manual_validate import _SCREENSHOT_CACHE
+        _SCREENSHOT_CACHE.clear()
+    except Exception:
+        pass
     return {"status": "ok", "cleared": True}

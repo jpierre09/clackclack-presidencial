@@ -4,7 +4,7 @@ export function AlertLegend() {
       <span className="legend-item danger">
         <img src="/alert-danger.svg" alt="Alerta roja" className="alert-logo" />
         <strong>Roja:</strong>
-        <small>Diferencia PH Senado vs Camara igual o mayor al 10%.</small>
+        <small>Suma de votos por fórmula supera total de votos en urna.</small>
       </span>
       <span className="legend-item info">
         <span className="alert-dot-info legend-dot" />

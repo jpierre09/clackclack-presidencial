@@ -688,30 +688,22 @@ async def export_alertas_excel(admin_token: str = ""):
             a.municipio_cod, a.zona_cod, a.puesto_cod, a.mesa,
             a.discrepancy_pct,
             p.municipio, p.nombre as puesto_nombre, p.departamento,
-            -- Use corrected votes if available, else OCR
-            COALESCE(mv_sen.corrected_ph_votes, r_sen.ph_total_votos) as votos_sen,
-            COALESCE(mv_cam.corrected_ph_votes, r_cam.ph_total_votos) as votos_cam,
-            r_sen.ph_total_votos as sen_ocr, r_cam.ph_total_votos as cam_ocr,
-            r_sen.votos_urna as sen_votos_urna, r_cam.votos_urna as cam_votos_urna,
-            r_sen.ocr_confidence as sen_conf, r_cam.ocr_confidence as cam_conf,
-            mv_sen.corrected_ph_votes as sen_corrected, mv_cam.corrected_ph_votes as cam_corrected,
-            mv_sen.action as sen_action, mv_cam.action as cam_action
+            COALESCE(mv_pres.corrected_ph_votes, r_pres.ph_total_votos) as votos_pres,
+            r_pres.ph_total_votos as pres_ocr,
+            r_pres.votos_urna as pres_votos_urna,
+            r_pres.ocr_confidence as pres_conf,
+            mv_pres.corrected_ph_votes as pres_corrected,
+            mv_pres.action as pres_action
         FROM alerts a
         LEFT JOIN puestos p ON p.municipio_cod = a.municipio_cod
             AND p.zona_cod = a.zona_cod AND p.puesto_cod = a.puesto_cod
-        LEFT JOIN e14_results r_sen ON r_sen.municipio_cod = a.municipio_cod
-            AND r_sen.zona_cod = a.zona_cod AND r_sen.puesto_cod = a.puesto_cod
-            AND r_sen.mesa = a.mesa AND r_sen.corporacion = 'SEN'
-        LEFT JOIN e14_results r_cam ON r_cam.municipio_cod = a.municipio_cod
-            AND r_cam.zona_cod = a.zona_cod AND r_cam.puesto_cod = a.puesto_cod
-            AND r_cam.mesa = a.mesa AND r_cam.corporacion = 'CAM'
-        LEFT JOIN manual_validations mv_sen ON mv_sen.municipio_cod = a.municipio_cod
-            AND mv_sen.zona_cod = a.zona_cod AND mv_sen.puesto_cod = a.puesto_cod
-            AND mv_sen.mesa = a.mesa AND mv_sen.corporacion = 'SEN'
-        LEFT JOIN manual_validations mv_cam ON mv_cam.municipio_cod = a.municipio_cod
-            AND mv_cam.zona_cod = a.zona_cod AND mv_cam.puesto_cod = a.puesto_cod
-            AND mv_cam.mesa = a.mesa AND mv_cam.corporacion = 'CAM'
-        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        LEFT JOIN e14_results r_pres ON r_pres.municipio_cod = a.municipio_cod
+            AND r_pres.zona_cod = a.zona_cod AND r_pres.puesto_cod = a.puesto_cod
+            AND r_pres.mesa = a.mesa AND r_pres.corporacion = 'PRES'
+        LEFT JOIN manual_validations mv_pres ON mv_pres.municipio_cod = a.municipio_cod
+            AND mv_pres.zona_cod = a.zona_cod AND mv_pres.puesto_cod = a.puesto_cod
+            AND mv_pres.mesa = a.mesa AND mv_pres.corporacion = 'PRES'
+        WHERE a.is_resolved = 0
         ORDER BY p.municipio, a.mesa
         """
     )
@@ -791,16 +783,12 @@ async def generate_alertas_zip(req: DeleteNoveltyRequest):
         """
         SELECT a.municipio_cod, a.zona_cod, a.puesto_cod, a.mesa,
                a.discrepancy_pct,
-               d_sen.filepath as sen_path, d_sen.filename as sen_filename,
-               d_cam.filepath as cam_path, d_cam.filename as cam_filename
+               d_pres.filepath as pres_path, d_pres.filename as pres_filename
         FROM alerts a
-        LEFT JOIN e14_downloads d_sen ON d_sen.municipio_cod = a.municipio_cod
-            AND d_sen.zona_cod = a.zona_cod AND d_sen.puesto_cod = a.puesto_cod
-            AND d_sen.mesa = a.mesa AND d_sen.corporacion = 'SEN'
-        LEFT JOIN e14_downloads d_cam ON d_cam.municipio_cod = a.municipio_cod
-            AND d_cam.zona_cod = a.zona_cod AND d_cam.puesto_cod = a.puesto_cod
-            AND d_cam.mesa = a.mesa AND d_cam.corporacion = 'CAM'
-        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        LEFT JOIN e14_downloads d_pres ON d_pres.municipio_cod = a.municipio_cod
+            AND d_pres.zona_cod = a.zona_cod AND d_pres.puesto_cod = a.puesto_cod
+            AND d_pres.mesa = a.mesa AND d_pres.corporacion = 'PRES'
+        WHERE a.is_resolved = 0
         ORDER BY a.discrepancy_pct DESC
         """
     )
@@ -815,7 +803,7 @@ async def generate_alertas_zip(req: DeleteNoveltyRequest):
         added: set[str] = set()
         with zipfile.ZipFile(str(out_path), "w", zipfile.ZIP_DEFLATED) as zf:
             for row in rows_list:
-                for path_field, name_field in [("sen_path", "sen_filename"), ("cam_path", "cam_filename")]:
+                for path_field, name_field in [("pres_path", "pres_filename")]:
                     filepath = row[path_field]
                     filename = row[name_field]
                     if not filepath or filepath in added:
@@ -1152,3 +1140,218 @@ async def export_novedades():
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# TINDER POR CAMPO — validación individual candidato por candidato
+# ════════════════════════════════════════════════════════════════════════════
+
+class FieldSubmitRequest(BaseModel):
+    municipio_cod: str
+    zona_cod: str
+    puesto_cod: str
+    mesa: int
+    corporacion: str = "PRES"
+    region_id: str                    # cand_1, niv_e11, blancos, etc.
+    action: str                       # approved | corrected | novelty
+    validated_valor: int | None = None
+    novelty_note: str | None = None
+
+
+@router.get("/tinder/next")
+async def tinder_next_field(username: str = Depends(_require_auth)):
+    """Devuelve el siguiente campo pendiente de validación para el Tinder."""
+    field = await db.get_next_field_to_validate(username)
+    if not field:
+        return {"done": True, "message": "No hay campos pendientes de validacion"}
+    return {"done": False, "field": field}
+
+
+@router.get("/tinder/screenshot/{mun}/{zona}/{puesto}/{mesa}/{region_id}")
+async def tinder_screenshot_region(
+    mun: str, zona: str, puesto: str, mesa: int, region_id: str
+):
+    """Devuelve PNG del crop del pantallazo definido en screenshot_regions del template."""
+    import asyncio
+    import json
+    from backend.config import DATA_DIR
+    import fitz
+    import numpy as np
+
+    cache_key = f"ss2:{mun}:{zona}:{puesto}:{mesa}:{region_id}"
+    cached = _SCREENSHOT_CACHE.get(cache_key)
+    if cached:
+        return Response(content=cached, media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=1800"})
+
+    # Resolver filepath del PDF
+    full_path = await _resolve_pdf_path(mun, zona, puesto, mesa, "PRES")
+
+    # ── Buscar región de pantallazo ──────────────────────────────────────────
+    # Prioridad: 1) screenshot_regions (definidas manualmente para el Tinder)
+    #            2) regions de OCR (fallback, misma región que el OCR usa)
+    #            3) página completa
+    template_file = DATA_DIR / "e14_template.json"
+    region = None
+    if template_file.exists():
+        try:
+            tpl = json.loads(template_file.read_text(encoding="utf-8"))
+
+            # 1. Screenshot regions (definidas con screenshot_regions.py)
+            ss = tpl.get("screenshot_regions", {})
+            if region_id in ss:
+                region = ss[region_id]
+            else:
+                # Buscar por sufijo: "cand_1" -> "default_cand_1"
+                match = next((v for k, v in ss.items()
+                              if k.endswith(f"_{region_id}") or k == f"default_{region_id}"), None)
+                if match:
+                    region = match
+                elif region_id.startswith("cand_"):
+                    num = region_id.split("_", 1)[-1]
+                    match = next((v for v in ss.values()
+                                  if v.get("tipo") == "candidato" and
+                                  str(v.get("label", "")).startswith(f"Candidato {num}")), None)
+                    if match:
+                        region = match
+
+            # 2. Fallback a regiones de OCR si no hay screenshot region
+            if not region:
+                ocr_regions = tpl.get("regions", [])
+                r = next((r for r in ocr_regions if r.get("id") == region_id), None)
+                if not r:
+                    r = next((r for r in ocr_regions
+                              if r.get("id", "").endswith(f"_{region_id}") or
+                              r.get("id", "") == f"default_{region_id}"), None)
+                if not r and region_id.startswith("cand_"):
+                    num = region_id.split("_", 1)[-1]
+                    r = next((r for r in ocr_regions
+                              if r.get("tipo") == "candidato" and
+                              str(r.get("numero", "")) == num), None)
+                if not r:
+                    tipo_map = {
+                        "niv_e11": "nivelacion", "niv_urna": "nivelacion",
+                        "blancos": "blancos_nulos", "nulos": "blancos_nulos",
+                        "no_marcados": "blancos_nulos", "suma": "blancos_nulos",
+                        "recuento": "recuento",
+                    }
+                    tipo_target = tipo_map.get(region_id)
+                    if tipo_target:
+                        r = next((r for r in ocr_regions if r.get("tipo") == tipo_target), None)
+                if r:
+                    region = r
+        except Exception:
+            pass
+
+    if not region:
+        region = {"page": 1, "x0_pct": 0.0, "y0_pct": 0.0, "x1_pct": 1.0, "y1_pct": 1.0}
+
+    # Capturar region en variable local para evitar problemas de closure en threads
+    _region = dict(region)
+
+    def _render():
+        scale = 2.5
+        doc = fitz.open(str(full_path))
+        page_idx = min(max(0, _region["page"] - 1), len(doc) - 1)
+        page = doc[page_idx]
+        pr = page.rect  # coordenadas en puntos PDF (no escaladas)
+
+        x0 = pr.x0 + pr.width  * _region["x0_pct"]
+        y0 = pr.y0 + pr.height * _region["y0_pct"]
+        x1 = pr.x0 + pr.width  * _region["x1_pct"]
+        y1 = pr.y0 + pr.height * _region["y1_pct"]
+
+        # Renderizar la página completa a escala y recortar en numpy/PIL
+        mat = fitz.Matrix(scale, scale)
+        pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB)
+        doc.close()
+
+        # Convertir a array y recortar manualmente
+        import numpy as np
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+
+        # Coordenadas en píxeles escalados
+        py0 = max(0, int(y0 * scale))
+        py1 = min(pix.height, int(y1 * scale))
+        px0 = max(0, int(x0 * scale))
+        px1 = min(pix.width,  int(x1 * scale))
+
+        crop = arr[py0:py1, px0:px1]
+
+        # Convertir de vuelta a PNG
+        import cv2
+        _, buf = cv2.imencode('.png', cv2.cvtColor(crop, cv2.COLOR_RGB2BGR))
+        return buf.tobytes()
+
+    loop = asyncio.get_event_loop()
+    png = await loop.run_in_executor(_SCREENSHOT_POOL, _render)
+
+    _SCREENSHOT_CACHE[f"ss2:{mun}:{zona}:{puesto}:{mesa}:{region_id}"] = png
+
+    return Response(content=png, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+@router.post("/tinder/submit")
+async def tinder_submit_field(
+    req: FieldSubmitRequest, username: str = Depends(_require_auth)
+):
+    """Guarda la decision del validador para un campo individual."""
+    if req.action not in ("approved", "corrected", "novelty"):
+        raise HTTPException(status_code=400, detail="action must be approved|corrected|novelty")
+    if req.action == "corrected" and req.validated_valor is None:
+        raise HTTPException(status_code=400, detail="validated_valor required when action=corrected")
+    if req.action == "novelty" and not req.novelty_note:
+        raise HTTPException(status_code=400, detail="novelty_note required when action=novelty")
+
+    # El valor validado: si approved, tomar el OCR; si corrected, el enviado
+    valor = req.validated_valor
+    if req.action == "approved":
+        # Obtener el valor OCR de field_validations
+        conn = await db.get_db()
+        rows = await conn.execute_fetchall(
+            """SELECT ocr_valor FROM field_validations
+               WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+                 AND mesa=? AND corporacion=? AND region_id=?""",
+            (req.municipio_cod, req.zona_cod, req.puesto_cod,
+             req.mesa, req.corporacion, req.region_id),
+        )
+        if rows:
+            valor = rows[0]["ocr_valor"]
+
+    await db.submit_field_validation(
+        municipio_cod   = req.municipio_cod,
+        zona_cod        = req.zona_cod,
+        puesto_cod      = req.puesto_cod,
+        mesa            = req.mesa,
+        corporacion     = req.corporacion,
+        region_id       = req.region_id,
+        action          = req.action,
+        validated_valor = valor,
+        novelty_note    = req.novelty_note,
+        validated_by    = username,
+    )
+
+    # Si es novedad, publicarla como alerta info
+    if req.action == "novelty" and req.novelty_note:
+        await db.add_novelty_note(
+            req.municipio_cod, req.zona_cod, req.puesto_cod,
+            req.mesa, req.corporacion, username,
+            f"[Campo {req.region_id}] {req.novelty_note}"
+        )
+
+    await event_bus.publish("field_validated", {
+        "municipio_cod": req.municipio_cod,
+        "mesa":          req.mesa,
+        "region_id":     req.region_id,
+        "action":        req.action,
+        "validated_by":  username,
+    })
+
+    return {"status": req.action, "region_id": req.region_id}
+
+
+@router.get("/tinder/stats")
+async def tinder_stats(username: str = Depends(_require_auth)):
+    """Estadísticas globales del Tinder de validación por campo."""
+    return await db.get_field_validation_stats()

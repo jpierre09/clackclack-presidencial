@@ -1,63 +1,47 @@
-"""Alert engine - detects vote discrepancies after manual validation."""
+"""Alert engine — detects OCR arithmetic issues for presidential E-14 mesas."""
 from datetime import datetime
 from backend import database as db
-from backend.config import ALERT_DISCREPANCY_PCT
 from backend.services.event_bus import event_bus
 
 
 async def evaluate_mesa(municipio_cod: str, zona_cod: str, puesto_cod: str, mesa: int):
-    """Evaluate a mesa for discrepancy alert. Called after manual validation."""
+    """Evaluate a PRES mesa for data-quality alert after manual validation."""
     conn = await db.get_db()
 
-    # Get both SEN and CAM results for this mesa (validated or corrected)
-    results = await conn.execute_fetchall(
+    rows = await conn.execute_fetchall(
         """
-        SELECT r.corporacion, r.ph_total_votos
+        SELECT r.ph_total_votos, r.votos_urna, r.all_sections_json, r.ocr_confidence
         FROM e14_results r
-        JOIN manual_validations mv
-            ON mv.municipio_cod = r.municipio_cod
-            AND mv.zona_cod = r.zona_cod
-            AND mv.puesto_cod = r.puesto_cod
-            AND mv.mesa = r.mesa
-            AND mv.corporacion = r.corporacion
         WHERE r.municipio_cod = ? AND r.zona_cod = ? AND r.puesto_cod = ?
-          AND r.mesa = ?
+          AND r.mesa = ? AND r.corporacion = 'PRES'
           AND r.status IN ('processed', 'corrected')
+        LIMIT 1
         """,
         (municipio_cod, zona_cod, puesto_cod, mesa),
     )
 
-    sen_votes = None
-    cam_votes = None
-    for r in results:
-        row = dict(r)
-        if row["corporacion"] == "SEN":
-            sen_votes = row["ph_total_votos"]
-        elif row["corporacion"] == "CAM":
-            cam_votes = row["ph_total_votos"]
-
-    # Only check when both SEN and CAM have been validated
-    if sen_votes is None or cam_votes is None:
+    if not rows:
         return False
 
-    max_votes = max(sen_votes, cam_votes, 1)
-    diff_pct = abs(sen_votes - cam_votes) / max_votes * 100
+    row = dict(rows[0])
+    total_candidatos = row.get("ph_total_votos") or 0
+    votos_urna = row.get("votos_urna") or 0
 
-    if diff_pct >= ALERT_DISCREPANCY_PCT:
+    # Flag when sum of all candidate votes exceeds total votes in ballot box
+    if votos_urna > 0 and total_candidatos > votos_urna:
+        over = total_candidatos - votos_urna
         alert_data = {
             "municipio_cod": municipio_cod,
             "zona_cod": zona_cod,
             "puesto_cod": puesto_cod,
             "mesa": mesa,
-            "alert_type": "vote_discrepancy",
+            "alert_type": "vote_sum_exceeds_urna",
             "severity": "danger",
             "description": (
-                f"Diferencia {diff_pct:.1f}% entre PH Senado ({sen_votes}) "
-                f"y Camara ({cam_votes})"
+                f"Suma candidatos ({total_candidatos}) supera votos en urna "
+                f"({votos_urna}) por {over}"
             ),
-            "sen_ph_votes": sen_votes,
-            "cam_ph_votes": cam_votes,
-            "discrepancy_pct": round(diff_pct, 1),
+            "discrepancy_pct": round(over / votos_urna * 100, 1),
             "created_at": datetime.now().isoformat(),
         }
         await db.upsert_alert(alert_data)
@@ -68,22 +52,20 @@ async def evaluate_mesa(municipio_cod: str, zona_cod: str, puesto_cod: str, mesa
                 "zona_cod": zona_cod,
                 "puesto_cod": puesto_cod,
                 "mesa": mesa,
-                "type": "vote_discrepancy",
+                "type": "vote_sum_exceeds_urna",
                 "severity": "danger",
-                "pct": round(diff_pct, 1),
             },
         )
         return True
-    else:
-        # Resolve any existing alert if now below threshold
-        await conn.execute(
-            """
-            UPDATE alerts SET is_resolved = 1, resolved_at = ?
-            WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
-              AND mesa = ? AND alert_type = 'vote_discrepancy' AND is_resolved = 0
-            """,
-            (datetime.now().isoformat(), municipio_cod, zona_cod, puesto_cod, mesa),
-        )
-        await conn.commit()
 
+    # Resolve any existing alert if numbers now look consistent
+    await conn.execute(
+        """
+        UPDATE alerts SET is_resolved = 1, resolved_at = ?
+        WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+          AND mesa = ? AND alert_type = 'vote_sum_exceeds_urna' AND is_resolved = 0
+        """,
+        (datetime.now().isoformat(), municipio_cod, zona_cod, puesto_cod, mesa),
+    )
+    await conn.commit()
     return False

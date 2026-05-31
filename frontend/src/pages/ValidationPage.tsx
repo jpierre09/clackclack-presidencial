@@ -24,7 +24,7 @@ export function ValidationPage({
   onSelectionChange,
   onRefresh,
 }: ValidationPageProps) {
-  const [corp, setCorp] = useState<"SEN" | "CAM">("SEN");
+  const corp = "PRES";
   const [payload, setPayload] = useState({
     ph_votos_lista: "",
     ph_total_votos: "",
@@ -59,7 +59,6 @@ export function ValidationPage({
           selection.zona_cod,
           selection.puesto_cod,
           selection.mesa,
-          corp
         );
         setData(response);
 
@@ -95,7 +94,6 @@ export function ValidationPage({
       selection.zona_cod,
       selection.puesto_cod,
       selection.mesa,
-      corp,
       {
         ph_votos_lista: payload.ph_votos_lista ? Number(payload.ph_votos_lista) : undefined,
         ph_total_votos: payload.ph_total_votos ? Number(payload.ph_total_votos) : undefined,
@@ -158,17 +156,9 @@ export function ValidationPage({
             <div className="corp-switch">
               <button
                 type="button"
-                className={corp === "SEN" ? "active" : ""}
-                onClick={() => setCorp("SEN")}
+                className="active"
               >
-                Senado
-              </button>
-              <button
-                type="button"
-                className={corp === "CAM" ? "active" : ""}
-                onClick={() => setCorp("CAM")}
-              >
-                Cámara
+                Presidencial
               </button>
             </div>
             {loading ? <span className="inline-note">Cargando datos OCR...</span> : null}

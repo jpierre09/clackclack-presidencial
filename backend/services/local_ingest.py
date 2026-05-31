@@ -7,13 +7,13 @@ from datetime import datetime
 from pathlib import Path
 
 from backend import database as db
-from backend.config import DEPT_CODE, E14_DOWNLOADS_DIR, LOCAL_SCAN_INTERVAL
+from backend.config import CORP_PRES, DEPT_CODE, E14_DOWNLOADS_DIR, LOCAL_SCAN_INTERVAL
 from backend.services import ocr_processor
 from backend.services.event_bus import event_bus
 
 
-FILE_RE = re.compile(r"^MESA_(\d{1,3})_(SEN|CAM)_.*\.pdf$", re.IGNORECASE)
-CODE_RE = re.compile(r"^(\d{2,3})-")
+FILE_RE = re.compile(r"^MESA_(\d{1,3})_(PRES|PRE|PRESIDENCIAL)_.*\.pdf$", re.IGNORECASE)
+CODE_RE = re.compile(r"^([A-Za-z0-9]{1,3})-")
 _scan_lock = asyncio.Lock()
 _OCR_SEM = asyncio.Semaphore(8)  # max concurrent OCR jobs
 
@@ -23,7 +23,8 @@ def _parse_code(part: str, size: int) -> str | None:
     match = CODE_RE.match(part)
     if not match:
         return None
-    return match.group(1).zfill(size)
+    code = match.group(1)
+    return code.zfill(size) if code.isdigit() else code.upper()
 
 
 
@@ -59,7 +60,7 @@ def parse_e14_metadata(pdf_path: Path) -> dict | None:
         return None
 
     mesa = int(file_match.group(1))
-    corporacion = file_match.group(2).upper()
+    corporacion = CORP_PRES  # normalise all variants to canonical "PRES"
 
     return {
         "municipio_cod": mun_code,
@@ -75,7 +76,7 @@ def parse_e14_metadata(pdf_path: Path) -> dict | None:
     }
 
 
-async def _has_processed_result(meta: dict) -> bool:
+async def _has_processed_result(meta: dict, retry_not_digitized: bool = False) -> bool:
     conn = await db.get_db()
     rows = await conn.execute_fetchall(
         """SELECT status FROM e14_results
@@ -92,10 +93,13 @@ async def _has_processed_result(meta: dict) -> bool:
     )
     if not rows:
         return False
-    return rows[0]["status"] in {"processed", "corrected", "not_digitized"}
+    skip_statuses = {"processed", "corrected"}
+    if not retry_not_digitized:
+        skip_statuses.add("not_digitized")
+    return rows[0]["status"] in skip_statuses
 
 
-async def ingest_file(pdf_path: Path) -> tuple[bool, str]:
+async def ingest_file(pdf_path: Path, retry_not_digitized: bool = False) -> tuple[bool, str]:
     """Ingest one local PDF. Returns (processed, reason)."""
     meta = parse_e14_metadata(pdf_path)
     if not meta:
@@ -103,10 +107,10 @@ async def ingest_file(pdf_path: Path) -> tuple[bool, str]:
 
     download_id = await db.insert_download(meta)
 
-    if await _has_processed_result(meta):
+    if await _has_processed_result(meta, retry_not_digitized=retry_not_digitized):
         return False, "already_processed"
 
-    await ocr_processor.process_e14(
+    result_id = await ocr_processor.process_e14(
         download_id=download_id,
         filepath=meta["full_path"],
         municipio_cod=meta["municipio_cod"],
@@ -115,6 +119,8 @@ async def ingest_file(pdf_path: Path) -> tuple[bool, str]:
         mesa=meta["mesa"],
         corporacion=meta["corporacion"],
     )
+    if result_id is None:
+        return True, "not_digitized"
     return True, "processed"
 
 

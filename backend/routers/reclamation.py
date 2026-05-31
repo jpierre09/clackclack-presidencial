@@ -1,4 +1,6 @@
 """Reclamation document generation endpoints."""
+from datetime import datetime
+
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from backend import database as db
@@ -31,7 +33,7 @@ async def generate_reclamation(req: ReclamationRequest):
         return StreamingResponse(
             buffer,
             media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f"attachment; filename=Recuento_Mesa_{alerts[0]['mesa']}.docx"}
+            headers={"Content-Disposition": f"attachment; filename=Reclamacion_Departamental_Mesa_{alerts[0]['mesa']}.docx"}
         )
     else:
         # Multiple alerts - return ZIP
@@ -42,3 +44,23 @@ async def generate_reclamation(req: ReclamationRequest):
             media_type="application/zip",
             headers={"Content-Disposition": f"attachment; filename=Reclamaciones_{mun}.zip"}
         )
+
+
+@router.post("/generate-departamental")
+async def generate_departamental_reclamations():
+    """Generate a ZIP with reclamation DOCXs for all unresolved discrepancy alerts."""
+    alerts = await db.get_all_alerts_for_reclamation()
+    if not alerts:
+        return {"error": "No active discrepancy alerts found"}
+
+    buffer = await docx_generator.generate_batch(alerts)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="Reclamaciones_Departamentales_{stamp}.zip"'
+            )
+        },
+    )

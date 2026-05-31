@@ -158,18 +158,21 @@ def prepare_pdf_bytes(pdf_path: str, max_pages: int = 1,
 # System prompt — comprehensive E-14 extraction rules
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """Eres un sistema experto de extracción de datos electorales de formularios E-14 colombianos (actas de escrutinio de jurados de votación delegados). Tu trabajo es leer PDFs escaneados de E-14 y extraer datos estructurados con precisión perfecta.
+SYSTEM_PROMPT = """Eres un sistema experto de extracción de datos electorales de formularios E-14 colombianos (actas de escrutinio de jurados de votación delegados). Tu trabajo es leer PDFs escaneados de E-14 presidenciales de PRIMERA VUELTA y extraer datos estructurados con precisión perfecta.
 
-## CONTEXTO DEL FORMULARIO E-14
+## CONTEXTO DEL FORMULARIO E-14 PRESIDENCIAL
 
-Cada E-14 contiene:
-- ENCABEZADO: corporación (Senado/Cámara), departamento, municipio, zona, puesto, mesa, código de transmisión.
+Este formulario corresponde a la elección de PRESIDENTE Y VICEPRESIDENTE DE LA REPÚBLICA — PRIMERA VUELTA.
+
+Cada E-14 presidencial contiene:
+- ENCABEZADO: corporación (PRESIDENTE Y VICEPRESIDENTE), departamento, municipio, zona, puesto, mesa, código de transmisión.
 - NIVELACIÓN: total sufragantes E-11, total votos en urna, total votos incinerados.
-- PARTIDOS: cada uno con código numérico, nombre, tipo de lista.
-  - Lista SIN voto preferente: solo casilla "votos por la agrupación política" (flecha →).
-  - Lista CON voto preferente: casilla 0 "votos solo por la agrupación" (flecha ←) + grilla de candidatos + casilla TOTAL al final.
-- VOTOS EN BLANCO, NULOS, NO MARCADOS al final de la circunscripción.
-- Posibles circunscripciones especiales (indígenas, afrodescendientes).
+- FÓRMULAS CANDIDATAS: cada fórmula (presidente + vicepresidente) presentada por un partido o movimiento.
+  - Todas las fórmulas son SIN voto preferente: solo casilla de votos totales por la fórmula.
+  - NO hay grilla de candidatos individuales dentro de cada fórmula.
+  - Cada fórmula tiene: código numérico, nombre del partido/movimiento, nombre de candidatos, casilla de votos.
+- VOTOS EN BLANCO, NULOS, NO MARCADOS al final.
+- NO hay circunscripciones especiales en elecciones presidenciales.
 
 ## ============================================================
 ## REGLA #1 — LA MÁS IMPORTANTE DE TODAS
@@ -312,15 +315,14 @@ En celdas individuales de la grilla de candidatos:
 - Asterisco solo = 0 votos.
 
 ## ============================================================
-## REGLA #6 — LISTA TODOS LOS CANDIDATOS CON VOTOS
+## REGLA #6 — FÓRMULAS PRESIDENCIALES (SIN voto preferente)
 ## ============================================================
 
-Para cada partido CON VOTO PREFERENTE, debes reportar TODOS los candidatos que tienen al menos 1 voto.
-- Recorre CADA celda de la grilla de candidatos de ese partido.
-- Compara cada celda contra las celdas claramente vacías/tachadas.
-- Si una celda tiene CUALQUIER marca que la distinga de una vacía → es un voto (probablemente 1).
-- Incluye el código del candidato (número impreso a su izquierda) y los votos leídos.
-- Si el total_registrado no cuadra con la suma, hay candidatos con '1' que no detectaste.
+En el E-14 presidencial TODAS las fórmulas son SIN_PREFERENTE.
+- NO hay grilla de candidatos individuales.
+- Cada fórmula tiene exactamente UNA casilla de votos (3 dígitos: centenas | decenas | unidades).
+- Aplica las reglas de lectura de casillas de 3 dígitos (Regla #5) para cada fórmula.
+- Lee TODAS las fórmulas que aparezcan en el acta, tengan votos o no.
 
 ## ============================================================
 ## FORMATO DE SALIDA
@@ -330,8 +332,7 @@ Responde EXCLUSIVAMENTE con JSON válido. Sin markdown, sin ```json, sin texto a
 
 {
   "encabezado": {
-    "corporacion": "SENADO|CAMARA",
-    "circunscripcion": "NACIONAL|TERRITORIAL",
+    "corporacion": "PRESIDENTE Y VICEPRESIDENTE",
     "departamento_cod": "XX",
     "departamento_nombre": "NOMBRE",
     "municipio_cod": "XXX",
@@ -347,19 +348,13 @@ Responde EXCLUSIVAMENTE con JSON válido. Sin markdown, sin ```json, sin texto a
     "total_votos_urna": número,
     "total_votos_incinerados": número|null
   },
-  "partidos": [
+  "formulas": [
     {
       "codigo": "0000",
-      "nombre": "NOMBRE COMPLETO",
-      "tipo_lista": "SIN_PREFERENTE|CON_PREFERENTE",
-      "votos_agrupacion": número,
-      "candidatos": [
-        {"codigo": 104, "votos": 2},
-        {"codigo": 115, "votos": 1, "nota": "1 detectado por comparación con celdas vacías"}
-      ],
-      "total_registrado": número,
-      "suma_calculada": número,
-      "consistente": true|false,
+      "partido": "NOMBRE PARTIDO O MOVIMIENTO",
+      "candidato_presidente": "NOMBRE CANDIDATO",
+      "candidato_vicepresidente": "NOMBRE CANDIDATO VP",
+      "votos": número,
       "confiabilidad": 0-100,
       "nota": "texto si aplica"
     }
@@ -368,36 +363,35 @@ Responde EXCLUSIVAMENTE con JSON válido. Sin markdown, sin ```json, sin texto a
   "votos_nulos": número,
   "votos_no_marcados": número,
   "reconciliacion": {
-    "suma_partidos": número,
+    "suma_formulas": número,
     "suma_especiales": número,
     "suma_total": número,
     "total_urna": número,
     "diferencia": número,
-    "suma_menor_o_igual_urna": true|false,
-    "nota": "La suma no iguala urna porque faltan circunscripciones especiales"
+    "suma_menor_o_igual_urna": true|false
   }
 }
 
 IMPORTANTE:
-- Solo incluye en "candidatos" los que tienen votos > 0. No incluyas candidatos con 0 votos.
-- NO incluyas partidos de la seccion "CIRCUNSCRIPCION ESPECIAL" (indígenas, afrodescendientes, etc).
-- Solo incluye partidos de la circunscripcion TERRITORIAL (Cámara) o NACIONAL (Senado)."""
+- Incluye TODAS las fórmulas que aparecen en el formulario, incluso con 0 votos.
+- NO hay circunscripciones especiales en presidencial — incluye todas las fórmulas.
+- La suma de votos de todas las fórmulas + blancos + nulos + no_marcados debe ser MENOR O IGUAL a total_votos_urna."""
 
 
-USER_PROMPT = """Extrae todos los datos de este formulario E-14.
+USER_PROMPT = """Extrae todos los datos de este formulario E-14 PRESIDENCIAL (PRESIDENTE Y VICEPRESIDENTE — PRIMERA VUELTA).
 
 INSTRUCCIONES CRÍTICAS:
-1. En las casillas de 3 dígitos (totales, nivelación, votos agrupación): los asteriscos (✱), X, #, rayas en las posiciones de centenas/decenas son RELLENO ANTI-FRAUDE, NO dígitos. Solo lee como dígito lo que sea claramente 0-9 manuscrito. Un ✱ en la posición de decenas NO es un "1".
-2. Para cada celda de la grilla de candidatos, compara visualmente contra las celdas vacías vecinas. Si una celda se ve DIFERENTE (trazo extra, línea más gruesa), tiene un voto. Reporta TODOS los candidatos con votos > 0.
-3. Después de leer, verifica que votos_agrupacion + suma_candidatos = total_registrado para CADA partido. Si no cuadra, busca los '1' faltantes en candidatos.
-4. Verifica que la suma global de partidos + blancos + nulos + no_marcados sea MENOR O IGUAL a total_votos_urna (NO será igual porque faltan circunscripciones especiales que no extraemos).
-5. VERIFICACIÓN ESPECIAL para VOTOS EN BLANCO, VOTOS NULOS, VOTOS NO MARCADOS:
+1. En las casillas de 3 dígitos (votos por fórmula, nivelación, blancos, nulos): los asteriscos (✱), X, #, rayas en las posiciones de centenas/decenas son RELLENO ANTI-FRAUDE, NO dígitos. Solo lee como dígito lo que sea claramente 0-9 manuscrito. Un ✱ en la posición de decenas NO es un "1".
+2. Lee TODAS las fórmulas candidatas del formulario. Cada fórmula tiene UNA casilla de 3 dígitos con los votos totales. No hay grilla de candidatos individuales.
+3. Verifica que la suma de votos de todas las fórmulas + blancos + nulos + no_marcados sea MENOR O IGUAL a total_votos_urna.
+4. VERIFICACIÓN ESPECIAL para VOTOS EN BLANCO, VOTOS NULOS, VOTOS NO MARCADOS:
    - Mira las tres casillas de cada fila (centenas | decenas | unidades).
    - Compara visualmente la casilla de UNIDADES de VOTOS EN BLANCO vs la de VOTOS NULOS.
    - Si son VISUALMENTE DIFERENTES entre sí → contienen DÍGITOS DIFERENTES (no ambas son "1").
    - El SIETE manuscrito (7) tiene forma de CRUZ o DAGA (†): barra horizontal arriba + trazo diagonal abajo.
      Aunque parezca un símbolo/asterisco por la barra, si tiene EXACTAMENTE barra-arriba + trazo-abajo → es 7.
    - Si VOTOS EN BLANCO unidades ≠ VOTOS NULOS unidades visualmente → asigna valores distintos.
+5. Identifica correctamente el nombre del candidato a presidente y vicepresidente de cada fórmula cuando aparezca en el formulario.
 6. Responde SOLO con el JSON. Nada más."""
 
 
@@ -491,6 +485,8 @@ def process_e14_pdf(pdf_path: str, api_key: str = "",
     # 3. Parse response
     raw_text = ""
     for block in api_response.get("content", []):
+        if not isinstance(block, dict):
+            continue
         if block.get("type") == "text":
             raw_text += block["text"]
 
@@ -505,9 +501,17 @@ def process_e14_pdf(pdf_path: str, api_key: str = "",
         extracted = json.loads(cleaned)
     except json.JSONDecodeError as e:
         extracted = {"_raw_response": raw_text, "_parse_error": str(e)}
+    else:
+        if not isinstance(extracted, dict):
+            extracted = {
+                "_raw_response": raw_text,
+                "_parse_error": f"Expected JSON object, got {type(extracted).__name__}",
+            }
 
     # 4. Compute cost based on model
     usage = api_response.get("usage", {})
+    if not isinstance(usage, dict):
+        usage = {}
     input_tokens  = usage.get("input_tokens", 0)
     output_tokens = usage.get("output_tokens", 0)
     # cache_tokens incluye thinking tokens en la factura de output
@@ -549,35 +553,56 @@ def process_e14_pdf(pdf_path: str, api_key: str = "",
 # ---------------------------------------------------------------------------
 
 def normalize_result(extracted: dict) -> dict:
-    """Convert the new detailed format to the flat format used by the rest of the system.
+    """Convert the presidential E-14 format to the flat format used by the rest of the system.
 
     Maps:
       encabezado.* → top-level fields
-      partidos[].votos_agrupacion → votos_lista
-      partidos[].total_registrado → total_votos
+      formulas[] → stored as partidos[] with tipo_lista=SIN_PREFERENTE
       reconciliacion → _reconciliacion
     """
-    enc = extracted.get("encabezado", {})
-    niv = extracted.get("nivelacion", {})
-    recon = extracted.get("reconciliacion", {})
+    if not isinstance(extracted, dict):
+        extracted = {"_parse_error": f"Expected dict, got {type(extracted).__name__}"}
 
-    partidos_normalized = []
-    for p in extracted.get("partidos", []):
-        # For SIN_PREFERENTE, total_registrado may be missing — use votos_agrupacion
-        votos_lista = p.get("votos_agrupacion", 0)
-        total_votos = p.get("total_registrado", votos_lista)
+    def _dict_or_empty(value) -> dict:
+        return value if isinstance(value, dict) else {}
 
-        partidos_normalized.append({
-            "codigo": p.get("codigo", ""),
-            "nombre": p.get("nombre", ""),
-            "tipo_lista": p.get("tipo_lista", ""),
-            "votos_lista": votos_lista,
-            "total_votos": total_votos,
-            "candidatos": p.get("candidatos", []),
-            "suma_calculada": p.get("suma_calculada"),
-            "consistente": p.get("consistente"),
-            "confianza": p.get("confiabilidad", 75),
+    enc = _dict_or_empty(extracted.get("encabezado"))
+    niv = _dict_or_empty(extracted.get("nivelacion"))
+    recon = _dict_or_empty(extracted.get("reconciliacion"))
+
+    # Presidential E-14 uses "formulas" key; fall back to legacy "partidos" key
+    formulas_raw = extracted.get("formulas") or extracted.get("partidos") or []
+    if not isinstance(formulas_raw, list):
+        formulas_raw = []
+
+    formulas_normalized = []
+    for f in formulas_raw:
+        if not isinstance(f, dict):
+            continue
+        votos = f.get("votos", f.get("votos_agrupacion", 0)) or 0
+        nombre = (
+            f.get("candidato_presidente")
+            or f.get("partido")
+            or f.get("nombre")
+            or ""
+        )
+        formulas_normalized.append({
+            "codigo": f.get("codigo", ""),
+            "nombre": nombre,
+            "partido": f.get("partido", ""),
+            "candidato_presidente": f.get("candidato_presidente", ""),
+            "candidato_vicepresidente": f.get("candidato_vicepresidente", ""),
+            "tipo_lista": "SIN_PREFERENTE",
+            "votos_lista": votos,
+            "total_votos": votos,
+            "candidatos": [],
+            "suma_calculada": votos,
+            "consistente": True,
+            "confianza": f.get("confiabilidad", 75),
         })
+
+    # Total sum of all candidate formula votes (stored in ph_total_votos for DB compat)
+    total_formula_votes = sum(f["total_votos"] for f in formulas_normalized)
 
     result = {
         "serial": enc.get("serial", ""),
@@ -588,25 +613,24 @@ def normalize_result(extracted: dict) -> dict:
         "zona": enc.get("zona", ""),
         "puesto": enc.get("puesto", ""),
         "mesa": enc.get("mesa", ""),
-        "corporacion": enc.get("corporacion", ""),
+        "corporacion": "PRES",
         "lugar": enc.get("puesto_nombre", ""),
         "codigo_transmision": enc.get("codigo_transmision", ""),
         "nivelacion": {
             "total_sufragantes_e11": niv.get("total_sufragantes_e11"),
             "total_votos_urna": niv.get("total_votos_urna"),
         },
-        "partidos": partidos_normalized,
+        "partidos": formulas_normalized,
         "votos_en_blanco": extracted.get("votos_blanco", 0),
         "votos_nulos": extracted.get("votos_nulos", 0),
         "votos_no_marcados": extracted.get("votos_no_marcados", 0),
-        "confianza_general": _avg_confidence(partidos_normalized),
+        "confianza_general": _avg_confidence(formulas_normalized),
+        "total_formula_votes": total_formula_votes,
         "_reconciliacion": recon,
-        "_meta": extracted.get("_meta", {}),
+        "_meta": _dict_or_empty(extracted.get("_meta")),
     }
 
-    # Run post-OCR arithmetic validation
     result["_validacion"] = validate_result(result)
-
     return result
 
 
@@ -658,80 +682,55 @@ def validate_result(norm: dict) -> dict:
 
 
 def _validate_partido(p: dict) -> dict:
-    """Validate a single party: votos_agrupacion + sum(candidatos) == total_registrado."""
+    """Validate a single presidential formula (all are SIN_PREFERENTE)."""
     nombre = p.get("nombre", "?")
     codigo = p.get("codigo", "?")
-    tipo = p.get("tipo_lista", "")
-    votos_lista = p.get("votos_lista") or 0
-    total_votos = p.get("total_votos") or 0
-    candidatos = p.get("candidatos", [])
-
-    # For SIN_PREFERENTE, there are no individual candidates — just the list vote
-    if tipo == "SIN_PREFERENTE" or not candidatos:
-        return {
-            "codigo": codigo,
-            "nombre": nombre,
-            "nivel": ALERTA_OK,
-            "suma_calculada": votos_lista,
-            "total_registrado": total_votos,
-            "diferencia": 0,
-            "detalle": "Lista sin preferente - sin candidatos que sumar",
-        }
-
-    # CON_PREFERENTE: agrupacion + sum(candidatos) should == total
-    suma_cand = sum(c.get("votos", 0) for c in candidatos)
-    suma_calc = votos_lista + suma_cand
-    diff = total_votos - suma_calc
-
-    if diff == 0:
-        nivel = ALERTA_OK
-        detalle = "Suma cuadra perfectamente"
-    elif diff > 0:
-        # Missing votes — likely undetected '1's
-        nivel = ALERTA_ARITMETICA
-        detalle = f"Faltan {diff} votos (posibles '1' no detectados en candidatos)"
-    else:
-        # More votes in sum than total — reading error
-        nivel = ALERTA_REVISION_MANUAL
-        detalle = f"Suma excede total por {abs(diff)} (error de lectura en total o candidatos)"
+    votos = p.get("total_votos") or 0
 
     return {
         "codigo": codigo,
         "nombre": nombre,
-        "nivel": nivel,
-        "suma_calculada": suma_calc,
-        "total_registrado": total_votos,
-        "diferencia": diff,
-        "detalle": detalle,
+        "nivel": ALERTA_OK,
+        "suma_calculada": votos,
+        "total_registrado": votos,
+        "diferencia": 0,
+        "detalle": "Fórmula presidencial — voto directo sin preferente",
     }
 
 
 def _validate_global(norm: dict) -> dict:
-    """Global info: sum vs votos_urna (informational only, never raises alert).
+    """Global validation: sum of all formula votes + specials vs votos_urna.
 
-    The sum of extracted parties + blancos + nulos + no_marcados will NOT equal
-    votos_urna because circunscripcion especial votes are not extracted.
+    In presidential elections ALL votes are captured (no special circumscriptions),
+    so the sum should be <= votos_urna. If it exceeds it, raise a review alert.
     """
     niv = norm.get("nivelacion", {})
     votos_urna = niv.get("total_votos_urna") or 0
 
-    suma_partidos = sum((p.get("total_votos") or 0) for p in norm.get("partidos", []))
+    suma_formulas = sum((p.get("total_votos") or 0) for p in norm.get("partidos", []))
     blancos = norm.get("votos_en_blanco") or 0
     nulos = norm.get("votos_nulos") or 0
     no_marcados = norm.get("votos_no_marcados") or 0
     suma_especiales = blancos + nulos + no_marcados
-    suma_total = suma_partidos + suma_especiales
+    suma_total = suma_formulas + suma_especiales
 
     diferencia = suma_total - votos_urna if votos_urna else 0
 
+    if votos_urna > 0 and suma_total > votos_urna:
+        nivel = ALERTA_REVISION_MANUAL
+        detalle = f"Suma total ({suma_total}) supera votos en urna ({votos_urna}) — error de lectura"
+    else:
+        nivel = ALERTA_OK
+        detalle = f"OK: suma={suma_total} ≤ urna={votos_urna}"
+
     return {
-        "nivel": ALERTA_OK,
-        "suma_partidos": suma_partidos,
+        "nivel": nivel,
+        "suma_formulas": suma_formulas,
         "suma_especiales": suma_especiales,
         "suma_total": suma_total,
         "total_urna": votos_urna,
         "diferencia": diferencia,
-        "detalle": f"Informativo: suma={suma_total}, urna={votos_urna} (no comparable, faltan circunscripciones especiales)",
+        "detalle": detalle,
     }
 
 

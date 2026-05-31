@@ -1,11 +1,11 @@
 interface TopBarProps {
   activePage: string;
-  onSelect: (page: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "settings") => void;
+  onSelect: (page: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "template" | "settings") => void;
   novedadesCount?: number;
 }
 
 const pages: Array<{
-  id: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "settings";
+  id: "dashboard" | "review" | "results" | "map" | "novedades" | "progreso" | "template" | "settings";
   label: string;
 }> = [
   { id: "dashboard", label: "Dashboard" },
@@ -14,6 +14,7 @@ const pages: Array<{
   { id: "map", label: "Mapa" },
   { id: "novedades", label: "Novedades" },
   { id: "progreso", label: "Progreso" },
+  { id: "template", label: "Plantilla E-14" },
   { id: "settings", label: "Config" },
 ];
 

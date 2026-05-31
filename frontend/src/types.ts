@@ -15,6 +15,11 @@ export interface DashboardSummary {
   novedades_count: number;
 }
 
+export interface MunicipioOption {
+  municipio_cod: string;
+  municipio: string;
+}
+
 export interface NovedadItem {
   id: number;
   municipio_cod: string;
@@ -43,12 +48,9 @@ export interface ValidationItem extends NovedadItem {
 
 export interface MesaData {
   mesa: number;
-  sen_votes: number | null;
-  cam_votes: number | null;
-  sen_status: string | null;
-  cam_status: string | null;
-  sen_conf: number | null;
-  cam_conf: number | null;
+  pres_votes: number | null;
+  pres_status: string | null;
+  pres_conf: number | null;
   alert_type: string | null;
   severity: Severity | null;
   discrepancy_pct: number | null;
@@ -101,7 +103,7 @@ export interface AlertItem {
 }
 
 export interface AlertReviewCorpItem {
-  corp: "SEN" | "CAM";
+  corp: "PRES";
   validated_votes: number | null;
   ai_votes: number | null;
   votos_urna: number | null;
@@ -134,8 +136,14 @@ export interface AlertReviewItem {
   reviewed_by: string | null;
   resolved_at: string | null;
   resolved_by: string | null;
-  sen: AlertReviewCorpItem;
-  cam: AlertReviewCorpItem;
+  pres: AlertReviewCorpItem;
+}
+
+export interface AlertReviewSummary {
+  real_alert: number;
+  false_alert: number;
+  pending: number;
+  reviewed_total: number;
 }
 
 export interface MapItem {
@@ -215,6 +223,23 @@ export interface UserSettings {
   user_cc: string;
 }
 
+export interface PublicMunicipioPdfExportResponse {
+  status: string;
+  municipio_cod: string;
+  municipio: string;
+  filename: string;
+  public_url: string;
+  files: number;
+  missing_files: number;
+  size_bytes: number;
+}
+
+export interface PublicExportMunicipioOption {
+  municipio_cod: string;
+  municipio: string;
+  pdf_count: number;
+}
+
 export interface ReclamationRequest {
   level: "municipio" | "zona" | "puesto" | "mesa";
   municipio_cod: string;
@@ -225,41 +250,18 @@ export interface ReclamationRequest {
   user_cc?: string;
 }
 
-export interface CamaraPartyRow {
-  party_name: string;
+export interface PresFormulaRow {
+  formula_name: string;
   votes: number;
   vote_share_pct: number;
-  curules_current: number;
-  projected_votes: number;
-  curules_projected: number;
-  color: string;
-  logo_file?: string | null;
-  is_pacto_historico: boolean;
 }
 
-export interface CamaraTimelinePoint {
-  mesas_reportadas: number;
-  coverage_pct: number;
-  timestamp: string | null;
-  party_votes: Record<string, number>;
-  party_curules: Record<string, number>;
-}
-
-export interface CamaraLiveResponse {
-  curules_total: number;
+export interface PresLiveResponse {
   mesas_total: number;
   mesas_reportadas: number;
   coverage_pct: number;
   projection_scale: number;
-  total_votes_current: number;
-  cociente_electoral_current: number;
-  threshold_votes_current: number;
-  parties: CamaraPartyRow[];
-  tracked_parties: string[];
-  seat_order_current: string[];
-  seat_order_visual_current?: string[];
-  seat_order_projected: string[];
-  seat_order_visual_projected?: string[];
-  timeline: CamaraTimelinePoint[];
+  total_votes: number;
+  formulas: PresFormulaRow[];
   updated_at: string;
 }

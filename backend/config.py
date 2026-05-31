@@ -1,4 +1,4 @@
-"""Central configuration for ClackClack backend."""
+"""Central configuration for ClackClack backend — Presidencial 2026."""
 import os
 from pathlib import Path
 
@@ -25,7 +25,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
 # Persistent storage: use PERSIST_DIR env var (e.g. /persist on Railway)
-# so the DB and downloads survive deploys. Falls back to BASE_DIR for local dev.
 _persist = Path(os.getenv("PERSIST_DIR", "")).resolve() if os.getenv("PERSIST_DIR") else BASE_DIR
 E14_DOWNLOADS_DIR = _persist / "e14_downloads"
 DB_PATH = _persist / "clackclack.db"
@@ -37,40 +36,28 @@ FRONTEND_PUBLIC_DIR = FRONTEND_DIR / "public"
 DIVIPOLE_XLSX = DATA_DIR / "DOC-20260203-WA0063..xlsx"
 ANTIOQUIA_PUESTOS_JSON = DATA_DIR / "antioquia_puestos.json"
 COMISIONES_XLSX = DATA_DIR / "distribucion_comisiones.xlsx"
-FORMATO_DOCX = DATA_DIR / "FORMATO RECUENTO DE VOTOS .docx"
+_departamental_template = next(BASE_DIR.glob("formato reclamaci*n departamental.docx"), None)
+FORMATO_DOCX = _departamental_template or (DATA_DIR / "FORMATO RECUENTO DE VOTOS .docx")
 
-# Registraduria URLs
-REGISTRADURIA_BASE_URL = "https://divulgacione14congreso.registraduria.gov.co"
+# Registraduria URLs — presidencial primera vuelta 2026
+REGISTRADURIA_BASE_URL = "https://divulgacione14presidencial.registraduria.gov.co"
 REGISTRADURIA_CATALOGS_URL = f"{REGISTRADURIA_BASE_URL}/assets/temis/divipol_json"
 REGISTRADURIA_PDF_URL = f"{REGISTRADURIA_BASE_URL}/assets/temis/pdf"
 
 # Department filter: "ALL" to process all departments, or a 2-digit code (e.g. "01" = Antioquia)
-# NOTE: Registraduría uses "01" for Antioquia (NOT "05" which is Bolívar in their system)
 DEPT_CODE = os.getenv("DEPT_CODE", "01")
 DEPT_NAME = os.getenv("DEPT_NAME", "TODOS")
 
-# Corporation codes (from allCorporations.json)
-CORP_SEN = "SEN"
-CORP_CAM = "CAM"
-CORP_CODE_MAP = {"001": "SEN", "002": "CAM"}
+# Corporation code — presidencial primera vuelta
+CORP_PRES = "PRES"
 
 # Alert thresholds
-ALERT_DISCREPANCY_PCT = 10.0  # >= 10% difference triggers danger alert
 ALERT_LOW_CONFIDENCE = 60.0   # OCR confidence < 60% triggers warning
-
-# Camara Antioquia projection settings
-CAMARA_CURULES_ANTIOQUIA = 17
-CAMARA_TIMELINE_POINTS = 80
-
-# Pacto Historico identification patterns (case-insensitive)
-PH_PATTERNS = ["PACTO", "PACT0", "PACTC", "HISTORICO", "HIST0RICO"]
 
 # Claude OCR settings
 CLAUDE_DPI = 150
-CLAUDE_MAX_PAGES_SEN = 1       # Only page 5 (PACTO page) — set via page offset below
-CLAUDE_MAX_PAGES_CAM = 1
-CLAUDE_SEN_PACTO_PAGE = env_int("CLAUDE_SEN_PACTO_PAGE", 5)   # 1-indexed PDF page with Pacto SEN
-CLAUDE_CAM_PACTO_PAGE = env_int("CLAUDE_CAM_PACTO_PAGE", 1)   # 1-indexed PDF page with Pacto CAM
+CLAUDE_PRES_PAGE = env_int("CLAUDE_PRES_PAGE", 1)   # 1-indexed PDF page for presidencial E-14
+CLAUDE_MAX_PAGES_PRES = 1
 
 # SFTP credentials (set to enable SFTP download; if unset, poller waits)
 SFTP_HOST     = os.getenv("SFTP_HOST", "")
@@ -78,7 +65,7 @@ SFTP_PORT     = env_int("SFTP_PORT", 22)
 SFTP_USER     = os.getenv("SFTP_USER", "")
 SFTP_PASS     = os.getenv("SFTP_PASS", "")
 SFTP_KEY_PATH = os.getenv("SFTP_KEY_PATH", "")       # Path to private key file (optional)
-SFTP_PATH     = os.getenv("SFTP_PATH", "/e14")       # Remote directory with PDFs
+SFTP_PATH     = os.getenv("SFTP_PATH", "/cargue")    # Remote directory with E14 cuts
 
 SFTP_READY = bool(SFTP_HOST and SFTP_USER and (SFTP_PASS or SFTP_KEY_PATH))
 
@@ -92,6 +79,8 @@ SERVE_FRONTEND = env_flag("CLACK_SERVE_FRONTEND", False)
 
 # Manual validation tool
 VALIDATE_SETUP_TOKEN = os.getenv("VALIDATE_SETUP_TOKEN", "")  # required to create users
+PUBLIC_EXPORT_SHARE_TOKEN = os.getenv("PUBLIC_EXPORT_SHARE_TOKEN", "")
+DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 
 # Server
 HOST = os.getenv("CLACK_HOST", "0.0.0.0")

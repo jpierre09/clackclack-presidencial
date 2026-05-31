@@ -6,7 +6,7 @@ import unicodedata
 from collections import defaultdict
 from datetime import datetime
 
-from backend.config import CAMARA_CURULES_ANTIOQUIA, CAMARA_TIMELINE_POINTS, DB_PATH
+from backend.config import DB_PATH
 
 _db: aiosqlite.Connection | None = None
 
@@ -33,6 +33,7 @@ async def close_db():
 async def init_db():
     db = await get_db()
     await db.executescript(SCHEMA)
+    await db.executescript(_SCHEMA_EXTRA)
     # Migrations: add columns that may not exist in older DBs
     for migration in _MIGRATIONS:
         try:
@@ -48,7 +49,42 @@ _MIGRATIONS = [
     "ALTER TABLE alerts ADD COLUMN review_decision TEXT",
     "ALTER TABLE alerts ADD COLUMN reviewed_at TEXT",
     "ALTER TABLE alerts ADD COLUMN reviewed_by TEXT",
+    # OCR local: firmas y recuento
+    "ALTER TABLE e14_results ADD COLUMN firmas_json TEXT",
+    "ALTER TABLE e14_results ADD COLUMN tiene_recuento INTEGER",
+    # Encabezado OCR (municipio/zona/puesto/mesa leídos del PDF)
+    "ALTER TABLE e14_results ADD COLUMN encabezado_json TEXT",
 ]
+
+_SCHEMA_EXTRA = """
+CREATE TABLE IF NOT EXISTS field_validations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    municipio_cod TEXT NOT NULL,
+    zona_cod TEXT NOT NULL,
+    puesto_cod TEXT NOT NULL,
+    mesa INTEGER NOT NULL,
+    corporacion TEXT NOT NULL DEFAULT 'PRES',
+    region_id TEXT NOT NULL,       -- id de la region del template (cand_1, niv_e11, etc.)
+    tipo TEXT NOT NULL,            -- candidato | nivelacion | blancos_nulos | firmas | recuento
+    campo_label TEXT NOT NULL,     -- nombre legible (ej: "Candidato 1 - Ivan Cepeda")
+    ocr_valor INTEGER,             -- valor detectado por OCR
+    ocr_raw TEXT,                  -- texto crudo del OCR
+    ocr_conf INTEGER,              -- confianza 0-100
+    validated_valor INTEGER,       -- valor aprobado/corregido por el validador
+    action TEXT,                   -- approved | corrected | novelty | pending
+    novelty_note TEXT,
+    validated_by TEXT,
+    validated_at TEXT,
+    UNIQUE(municipio_cod, zona_cod, puesto_cod, mesa, corporacion, region_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_field_val_location
+    ON field_validations(municipio_cod, zona_cod, puesto_cod, mesa, corporacion);
+
+CREATE INDEX IF NOT EXISTS idx_field_val_pending
+    ON field_validations(action, validated_at)
+    WHERE action IS NULL OR action = 'pending';
+"""
 
 
 SCHEMA = """
@@ -261,105 +297,19 @@ CREATE INDEX IF NOT EXISTS idx_alerts_full_location
 
 
 # --- CRUD Operations ---
-_PARTY_WORD_RE = re.compile(r"[^A-Z0-9 ]+")
+_FORMULA_WORD_RE = re.compile(r"[^A-Z0-9 ]+")
 _SPACE_RE = re.compile(r"\s+")
-_INDIGENOUS_TOKENS = (
-    "INDIGENA",
-    "INDIGENAS",
-    "AICO",
-    "MAIS",
-    "CABILDO",
-    "RESGUARDO",
-)
-_PREFERRED_PARTIES = [
-    "PARTIDO CONSERVADOR",
-    "CREEMOS",
-    "PARTIDO LIBERAL",
-    "PARTIDO VERDE",
-    "PACTO HISTORICO",
-    "CENTRO DEMOCRATICO",
-    "FUERZA CIUDADANA",
-    "CAMBIO RADICAL",
-    "PARTIDO DE LA U",
-]
-_PARTY_LOGOS = {
-    "PARTIDO CONSERVADOR": "/party-logos/conservador.png",
-    "CREEMOS": "/party-logos/creemos.svg",
-    "PARTIDO LIBERAL": "/party-logos/liberal.png",
-    "PARTIDO VERDE": "/party-logos/verde.png",
-    "PACTO HISTORICO": "/party-logos/pacto-historico.png",
-    "CENTRO DEMOCRATICO": "/party-logos/centro-democratico.png",
-    "FUERZA CIUDADANA": "/party-logos/fuerza-ciudadana.png",
-    "CAMBIO RADICAL": "/party-logos/cambio-radical.png",
-    "PARTIDO DE LA U": "/party-logos/partido-u.png",
-}
 
 
-def _normalize_party_name(raw_name: str) -> str:
+def _normalize_formula_name(raw_name: str) -> str:
+    """Normalize a presidential candidate formula name."""
     text = (raw_name or "").strip().upper()
     if not text:
         return ""
     normalized = unicodedata.normalize("NFD", text)
     normalized = "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
-    normalized = _PARTY_WORD_RE.sub(" ", normalized)
-    normalized = _SPACE_RE.sub(" ", normalized).strip()
-    if "PACT" in normalized and "HISTOR" in normalized:
-        return "PACTO HISTORICO"
-    return normalized
-
-
-def _contains_any_token(text: str, tokens: tuple[str, ...]) -> bool:
-    return any(token in text for token in tokens)
-
-
-def _map_party_for_dashboard(normalized_name: str) -> str | None:
-    if not normalized_name:
-        return None
-    if _contains_any_token(normalized_name, _INDIGENOUS_TOKENS):
-        return None
-
-    if "PACTO HISTORICO" in normalized_name:
-        return "PACTO HISTORICO"
-    if "CONSERVADOR" in normalized_name:
-        return "PARTIDO CONSERVADOR"
-    if "CREEMOS" in normalized_name:
-        return "CREEMOS"
-    if "LIBERAL" in normalized_name:
-        return "PARTIDO LIBERAL"
-    if "ALIANZA VERDE" in normalized_name or (
-        "VERDE" in normalized_name and "PACTO HISTORICO" not in normalized_name
-    ):
-        return "PARTIDO VERDE"
-    if "CENTRO DEMOCRATICO" in normalized_name:
-        return "CENTRO DEMOCRATICO"
-    if "FUERZA CIUDADANA" in normalized_name:
-        return "FUERZA CIUDADANA"
-    if "CAMBIO RADICAL" in normalized_name:
-        return "CAMBIO RADICAL"
-    if "PARTIDO DE LA U" in normalized_name or normalized_name == "LA U":
-        return "PARTIDO DE LA U"
-    return normalized_name
-
-
-def _ordered_parties(votes_by_party: dict[str, int]) -> list[str]:
-    preferred = [party for party in _PREFERRED_PARTIES if votes_by_party.get(party, 0) > 0]
-    extras = sorted(
-        [party for party in votes_by_party if party not in _PREFERRED_PARTIES and votes_by_party[party] > 0],
-        key=lambda party: (-votes_by_party[party], party),
-    )
-    return preferred + extras
-
-
-def _build_visual_seat_order(
-    seat_counts: dict[str, int], votes_by_party: dict[str, int], curules_total: int
-) -> list[str]:
-    order = _ordered_parties(votes_by_party)
-    seats: list[str] = []
-    for party in order:
-        seats.extend([party] * max(0, int(seat_counts.get(party, 0))))
-    if len(seats) < curules_total:
-        seats.extend([""] * (curules_total - len(seats)))
-    return seats[:curules_total]
+    normalized = _FORMULA_WORD_RE.sub(" ", normalized)
+    return _SPACE_RE.sub(" ", normalized).strip()
 
 
 def _to_int(value: object) -> int:
@@ -376,7 +326,8 @@ def _to_int(value: object) -> int:
         return 0
 
 
-def _extract_party_votes(all_sections_json: str | None) -> dict[str, int]:
+def _extract_formula_votes(all_sections_json: str | None) -> dict[str, int]:
+    """Extract votes per presidential candidate formula from stored JSON."""
     if not all_sections_json:
         return {}
     try:
@@ -386,22 +337,28 @@ def _extract_party_votes(all_sections_json: str | None) -> dict[str, int]:
     if not isinstance(sections, list):
         return {}
 
-    votes_by_party: defaultdict[str, int] = defaultdict(int)
+    votes_by_formula: defaultdict[str, int] = defaultdict(int)
     for section in sections:
         if not isinstance(section, dict):
             continue
-        if section.get("tipo") != "partido":
+        if section.get("tipo") not in ("formula", "partido"):
             continue
-        party_name = _normalize_party_name(str(section.get("nombre") or ""))
-        if not party_name:
+        # Use candidato_presidente if available, else nombre
+        name = (
+            section.get("candidato_presidente")
+            or section.get("nombre")
+            or ""
+        )
+        formula_name = _normalize_formula_name(str(name))
+        if not formula_name:
             continue
         votes = _to_int(section.get("total_votos"))
         if votes <= 0:
             votes = _to_int(section.get("votos_lista"))
         if votes < 0:
             votes = 0
-        votes_by_party[party_name] += votes
-    return dict(votes_by_party)
+        votes_by_formula[formula_name] += votes
+    return dict(votes_by_formula)
 
 
 async def _refresh_party_votes(db: aiosqlite.Connection, data: dict) -> None:
@@ -422,7 +379,7 @@ async def _refresh_party_votes(db: aiosqlite.Connection, data: dict) -> None:
     if status not in {"processed", "corrected"}:
         return
 
-    party_votes = _extract_party_votes(data.get("all_sections_json"))
+    party_votes = _extract_formula_votes(data.get("all_sections_json"))
     if not party_votes:
         return
 
@@ -514,8 +471,9 @@ async def insert_result(data: dict) -> int:
         (download_id, municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
          votantes_e11, votos_urna, ph_votos_lista, ph_total_votos,
          all_sections_json, ocr_confidence, total_paginas, processing_time_s,
-         status, error_message, processed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         status, error_message, processed_at, firmas_json, tiene_recuento,
+         encabezado_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
         DO UPDATE SET
             download_id = excluded.download_id,
@@ -529,7 +487,10 @@ async def insert_result(data: dict) -> int:
             processing_time_s = excluded.processing_time_s,
             status = excluded.status,
             error_message = excluded.error_message,
-            processed_at = excluded.processed_at
+            processed_at = excluded.processed_at,
+            firmas_json = excluded.firmas_json,
+            tiene_recuento = excluded.tiene_recuento,
+            encabezado_json = excluded.encabezado_json
         WHERE e14_results.status NOT IN ('processed', 'corrected')""",
         (
             data["download_id"],
@@ -549,10 +510,28 @@ async def insert_result(data: dict) -> int:
             data["status"],
             data.get("error_message"),
             data.get("processed_at"),
+            data.get("firmas_json"),
+            data.get("tiene_recuento"),
+            data.get("encabezado_json"),
         ),
     )
 
     await _refresh_party_votes(db, data)
+
+    # Sembrar campo-a-campo para el Tinder (solo en resultados procesados)
+    if data.get("status") == "processed" and data.get("all_sections_json"):
+        await seed_field_validations(
+            municipio_cod=data["municipio_cod"],
+            zona_cod=data["zona_cod"],
+            puesto_cod=data["puesto_cod"],
+            mesa=data["mesa"],
+            corporacion=data["corporacion"],
+            sections_json=data.get("all_sections_json", "[]"),
+            ocr_results={
+                "votantes_e11": data.get("votantes_e11"),
+                "votos_urna":   data.get("votos_urna"),
+            },
+        )
 
     await db.commit()
     row = await db.execute_fetchall(
@@ -732,6 +711,29 @@ async def get_dashboard_summary() -> dict:
     }
 
 
+async def get_hierarchy_with_alerts() -> list[dict]:
+    """Like get_hierarchy but restricted to municipios that have active alerts.
+    Used for the default (no-filter) dashboard view — fast and focused.
+    """
+    db = await get_db()
+    # Top 10 municipios por cantidad de alertas activas
+    alert_muns = await db.execute_fetchall(
+        """SELECT municipio_cod, COUNT(*) as cnt
+           FROM alerts WHERE is_resolved = 0
+           GROUP BY municipio_cod
+           ORDER BY cnt DESC LIMIT 10"""
+    )
+    mun_codes = [r["municipio_cod"] for r in alert_muns]
+    if not mun_codes:
+        return []
+    results = []
+    for mun_cod in mun_codes:
+        rows = await get_hierarchy(mun_cod)
+        results.extend(rows)
+    results.sort(key=lambda m: -(m.get("alerts_danger", 0) + m.get("alerts_warning", 0)))
+    return results
+
+
 async def get_hierarchy(municipio_cod: str | None = None) -> list[dict]:
     """Get hierarchical data: municipio > zona > puesto > mesas.
 
@@ -769,13 +771,13 @@ async def get_hierarchy(municipio_cod: str | None = None) -> list[dict]:
         ORDER BY p.municipio_cod, p.zona_cod, p.puesto_cod
     """, puesto_params)
 
-    # ── Query 2: all mesas data flat (one row per mesa) ────────────────────────
+    # ── Query 2: all mesas data flat (one row per mesa, PRES only) ────────────
     mesa_rows = await db.execute_fetchall(f"""
         SELECT
             d.municipio_cod, d.zona_cod, d.puesto_cod, d.mesa,
-            rs.ph_total_votos AS sen_votes, rc.ph_total_votos AS cam_votes,
-            rs.status AS sen_status, rc.status AS cam_status,
-            rs.ocr_confidence AS sen_conf, rc.ocr_confidence AS cam_conf,
+            rp.ph_total_votos AS pres_votes,
+            rp.status AS pres_status,
+            rp.ocr_confidence AS pres_conf,
             a.alert_type, a.severity, a.discrepancy_pct,
             CASE WHEN mv_n.id IS NOT NULL THEN 1 ELSE 0 END AS has_novelty
         FROM (
@@ -786,12 +788,9 @@ async def get_hierarchy(municipio_cod: str | None = None) -> list[dict]:
                 AND p2.departamento = 'ANTIOQUIA'
             {mesa_filter}
         ) d
-        LEFT JOIN e14_results rs ON rs.municipio_cod = d.municipio_cod
-            AND rs.zona_cod = d.zona_cod AND rs.puesto_cod = d.puesto_cod
-            AND rs.mesa = d.mesa AND rs.corporacion = 'SEN'
-        LEFT JOIN e14_results rc ON rc.municipio_cod = d.municipio_cod
-            AND rc.zona_cod = d.zona_cod AND rc.puesto_cod = d.puesto_cod
-            AND rc.mesa = d.mesa AND rc.corporacion = 'CAM'
+        LEFT JOIN e14_results rp ON rp.municipio_cod = d.municipio_cod
+            AND rp.zona_cod = d.zona_cod AND rp.puesto_cod = d.puesto_cod
+            AND rp.mesa = d.mesa AND rp.corporacion = 'PRES'
         LEFT JOIN alerts a ON a.municipio_cod = d.municipio_cod
             AND a.zona_cod = d.zona_cod AND a.puesto_cod = d.puesto_cod
             AND a.mesa = d.mesa AND a.is_resolved = 0 AND a.severity != 'info'
@@ -819,9 +818,9 @@ async def get_hierarchy(municipio_cod: str | None = None) -> list[dict]:
         key = (r["municipio_cod"], r["zona_cod"], r["puesto_cod"])
         mesas_by_puesto[key].append({
             "mesa": r["mesa"],
-            "sen_votes": r["sen_votes"], "cam_votes": r["cam_votes"],
-            "sen_status": r["sen_status"], "cam_status": r["cam_status"],
-            "sen_conf": r["sen_conf"], "cam_conf": r["cam_conf"],
+            "pres_votes": r["pres_votes"],
+            "pres_status": r["pres_status"],
+            "pres_conf": r["pres_conf"],
             "alert_type": r["alert_type"], "severity": r["severity"],
             "discrepancy_pct": r["discrepancy_pct"],
             "has_novelty": r["has_novelty"],
@@ -924,26 +923,19 @@ def _build_alert_review_item(row: dict) -> dict:
     puesto = row["puesto_cod"]
     mesa = row["mesa"]
 
-    def build_corp(prefix: str, corp: str) -> dict:
-        return {
-            "corp": corp,
-            "validated_votes": row[f"{prefix}_validated_votes"],
-            "ai_votes": row[f"{prefix}_ai_votes"],
-            "votos_urna": row[f"{prefix}_votos_urna"],
-            "ocr_confidence": row[f"{prefix}_ocr_confidence"],
-            "result_status": row[f"{prefix}_result_status"],
-            "validation_action": row[f"{prefix}_validation_action"],
-            "validated_by": row[f"{prefix}_validated_by"],
-            "validated_at": row[f"{prefix}_validated_at"],
-            "corrected_ph_votes": row[f"{prefix}_corrected_ph_votes"],
-            "screenshot_path": f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/{corp}",
-        }
-
-    sen_votes = row["sen_validated_votes"]
-    cam_votes = row["cam_validated_votes"]
-    vote_gap = None
-    if sen_votes is not None and cam_votes is not None:
-        vote_gap = abs(sen_votes - cam_votes)
+    pres_data = {
+        "corp": "PRES",
+        "validated_votes": row.get("pres_validated_votes"),
+        "ai_votes": row.get("pres_ai_votes"),
+        "votos_urna": row.get("pres_votos_urna"),
+        "ocr_confidence": row.get("pres_ocr_confidence"),
+        "result_status": row.get("pres_result_status"),
+        "validation_action": row.get("pres_validation_action"),
+        "validated_by": row.get("pres_validated_by"),
+        "validated_at": row.get("pres_validated_at"),
+        "corrected_ph_votes": row.get("pres_corrected_ph_votes"),
+        "screenshot_path": f"/api/validar/screenshot/{mun}/{zona}/{puesto}/{mesa}/PRES",
+    }
 
     return {
         "id": row["id"],
@@ -957,7 +949,7 @@ def _build_alert_review_item(row: dict) -> dict:
         "severity": row["severity"],
         "description": row["description"],
         "discrepancy_pct": row["discrepancy_pct"],
-        "vote_gap": vote_gap,
+        "vote_gap": None,
         "is_resolved": row["is_resolved"],
         "created_at": row["created_at"],
         "review_decision": row["review_decision"],
@@ -965,8 +957,7 @@ def _build_alert_review_item(row: dict) -> dict:
         "reviewed_by": row["reviewed_by"],
         "resolved_at": row["resolved_at"],
         "resolved_by": row["resolved_by"],
-        "sen": build_corp("sen", "SEN"),
-        "cam": build_corp("cam", "CAM"),
+        "pres": pres_data,
     }
 
 
@@ -997,54 +988,33 @@ async def get_alert_review_items(
             a.resolved_by,
             p.municipio,
             p.nombre AS puesto_nombre,
-            COALESCE(a.sen_ph_votes, sen_mv.corrected_ph_votes, sen_r.ph_total_votos) AS sen_validated_votes,
-            sen_r.ph_total_votos AS sen_ai_votes,
-            sen_r.votos_urna AS sen_votos_urna,
-            sen_r.ocr_confidence AS sen_ocr_confidence,
-            sen_r.status AS sen_result_status,
-            sen_mv.action AS sen_validation_action,
-            sen_mv.validated_by AS sen_validated_by,
-            sen_mv.validated_at AS sen_validated_at,
-            sen_mv.corrected_ph_votes AS sen_corrected_ph_votes,
-            COALESCE(a.cam_ph_votes, cam_mv.corrected_ph_votes, cam_r.ph_total_votos) AS cam_validated_votes,
-            cam_r.ph_total_votos AS cam_ai_votes,
-            cam_r.votos_urna AS cam_votos_urna,
-            cam_r.ocr_confidence AS cam_ocr_confidence,
-            cam_r.status AS cam_result_status,
-            cam_mv.action AS cam_validation_action,
-            cam_mv.validated_by AS cam_validated_by,
-            cam_mv.validated_at AS cam_validated_at,
-            cam_mv.corrected_ph_votes AS cam_corrected_ph_votes
+            COALESCE(pres_mv.corrected_ph_votes, pres_r.ph_total_votos) AS pres_validated_votes,
+            pres_r.ph_total_votos AS pres_ai_votes,
+            pres_r.votos_urna AS pres_votos_urna,
+            pres_r.ocr_confidence AS pres_ocr_confidence,
+            pres_r.status AS pres_result_status,
+            pres_mv.action AS pres_validation_action,
+            pres_mv.validated_by AS pres_validated_by,
+            pres_mv.validated_at AS pres_validated_at,
+            pres_mv.corrected_ph_votes AS pres_corrected_ph_votes
         FROM alerts a
         LEFT JOIN puestos p
             ON p.municipio_cod = a.municipio_cod
             AND p.zona_cod = a.zona_cod
             AND p.puesto_cod = a.puesto_cod
-        LEFT JOIN e14_results sen_r
-            ON sen_r.municipio_cod = a.municipio_cod
-            AND sen_r.zona_cod = a.zona_cod
-            AND sen_r.puesto_cod = a.puesto_cod
-            AND sen_r.mesa = a.mesa
-            AND sen_r.corporacion = 'SEN'
-        LEFT JOIN manual_validations sen_mv
-            ON sen_mv.municipio_cod = a.municipio_cod
-            AND sen_mv.zona_cod = a.zona_cod
-            AND sen_mv.puesto_cod = a.puesto_cod
-            AND sen_mv.mesa = a.mesa
-            AND sen_mv.corporacion = 'SEN'
-        LEFT JOIN e14_results cam_r
-            ON cam_r.municipio_cod = a.municipio_cod
-            AND cam_r.zona_cod = a.zona_cod
-            AND cam_r.puesto_cod = a.puesto_cod
-            AND cam_r.mesa = a.mesa
-            AND cam_r.corporacion = 'CAM'
-        LEFT JOIN manual_validations cam_mv
-            ON cam_mv.municipio_cod = a.municipio_cod
-            AND cam_mv.zona_cod = a.zona_cod
-            AND cam_mv.puesto_cod = a.puesto_cod
-            AND cam_mv.mesa = a.mesa
-            AND cam_mv.corporacion = 'CAM'
-        WHERE a.alert_type = 'vote_discrepancy'
+        LEFT JOIN e14_results pres_r
+            ON pres_r.municipio_cod = a.municipio_cod
+            AND pres_r.zona_cod = a.zona_cod
+            AND pres_r.puesto_cod = a.puesto_cod
+            AND pres_r.mesa = a.mesa
+            AND pres_r.corporacion = 'PRES'
+        LEFT JOIN manual_validations pres_mv
+            ON pres_mv.municipio_cod = a.municipio_cod
+            AND pres_mv.zona_cod = a.zona_cod
+            AND pres_mv.puesto_cod = a.puesto_cod
+            AND pres_mv.mesa = a.mesa
+            AND pres_mv.corporacion = 'PRES'
+        WHERE 1=1
     """
     params: list[str] = []
     if reviewed:
@@ -1068,7 +1038,7 @@ async def get_alert_review_summary(municipio_cod: str | None = None) -> dict[str
             SUM(CASE WHEN a.review_decision = 'false_alert' THEN 1 ELSE 0 END) AS false_alert,
             SUM(CASE WHEN a.is_resolved = 0 AND a.review_decision IS NULL THEN 1 ELSE 0 END) AS pending
         FROM alerts a
-        WHERE a.alert_type = 'vote_discrepancy'
+        WHERE 1=1
     """
     params: list[str] = []
     if municipio_cod:
@@ -1105,8 +1075,7 @@ async def bulk_review_pending_alerts(
             is_resolved = ?,
             resolved_at = ?,
             resolved_by = ?
-        WHERE alert_type = 'vote_discrepancy'
-          AND is_resolved = 0
+        WHERE is_resolved = 0
           AND review_decision IS NULL
     """
     params: list[object] = [
@@ -1134,7 +1103,7 @@ async def bulk_review_pending_alerts(
 async def review_alert(alert_id: int, decision: str, reviewed_by: str = "dashboard") -> bool:
     db = await get_db()
     rows = await db.execute_fetchall(
-        "SELECT id FROM alerts WHERE id = ? AND alert_type = 'vote_discrepancy'",
+        "SELECT id FROM alerts WHERE id = ?",
         (alert_id,),
     )
     if not rows:
@@ -1232,18 +1201,14 @@ async def get_alerts_for_reclamation(level: str, mun: str,
     db = await get_db()
     query = """
         SELECT a.*, p.municipio, p.nombre as puesto_nombre,
-            rs.ph_total_votos as sen_votes_actual,
-            rc.ph_total_votos as cam_votes_actual
+            rp.ph_total_votos as pres_votes_actual
         FROM alerts a
         JOIN puestos p ON p.municipio_cod = a.municipio_cod
             AND p.zona_cod = a.zona_cod AND p.puesto_cod = a.puesto_cod
-        LEFT JOIN e14_results rs ON rs.municipio_cod = a.municipio_cod
-            AND rs.zona_cod = a.zona_cod AND rs.puesto_cod = a.puesto_cod
-            AND rs.mesa = a.mesa AND rs.corporacion = 'SEN'
-        LEFT JOIN e14_results rc ON rc.municipio_cod = a.municipio_cod
-            AND rc.zona_cod = a.zona_cod AND rc.puesto_cod = a.puesto_cod
-            AND rc.mesa = a.mesa AND rc.corporacion = 'CAM'
-        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        LEFT JOIN e14_results rp ON rp.municipio_cod = a.municipio_cod
+            AND rp.zona_cod = a.zona_cod AND rp.puesto_cod = a.puesto_cod
+            AND rp.mesa = a.mesa AND rp.corporacion = 'PRES'
+        WHERE a.is_resolved = 0
             AND a.municipio_cod = ?
     """
     params = [mun]
@@ -1266,18 +1231,14 @@ async def get_all_alerts_for_reclamation() -> list[dict]:
     rows = await db.execute_fetchall(
         """
         SELECT a.*, p.municipio, p.nombre as puesto_nombre,
-            rs.ph_total_votos as sen_votes_actual,
-            rc.ph_total_votos as cam_votes_actual
+            rp.ph_total_votos as pres_votes_actual
         FROM alerts a
         JOIN puestos p ON p.municipio_cod = a.municipio_cod
             AND p.zona_cod = a.zona_cod AND p.puesto_cod = a.puesto_cod
-        LEFT JOIN e14_results rs ON rs.municipio_cod = a.municipio_cod
-            AND rs.zona_cod = a.zona_cod AND rs.puesto_cod = a.puesto_cod
-            AND rs.mesa = a.mesa AND rs.corporacion = 'SEN'
-        LEFT JOIN e14_results rc ON rc.municipio_cod = a.municipio_cod
-            AND rc.zona_cod = a.zona_cod AND rc.puesto_cod = a.puesto_cod
-            AND rc.mesa = a.mesa AND rc.corporacion = 'CAM'
-        WHERE a.is_resolved = 0 AND a.alert_type = 'vote_discrepancy'
+        LEFT JOIN e14_results rp ON rp.municipio_cod = a.municipio_cod
+            AND rp.zona_cod = a.zona_cod AND rp.puesto_cod = a.puesto_cod
+            AND rp.mesa = a.mesa AND rp.corporacion = 'PRES'
+        WHERE a.is_resolved = 0
         ORDER BY p.municipio, a.zona_cod, a.puesto_cod, a.mesa
         """
     )
@@ -1304,241 +1265,51 @@ async def get_map_data() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def _compute_curules(votes_by_party: dict[str, int], curules_total: int) -> dict:
-    cleaned_votes = {
-        party: int(votes)
-        for party, votes in votes_by_party.items()
-        if int(votes) > 0
-    }
-    total_votes = sum(cleaned_votes.values())
-
-    if curules_total <= 0 or not cleaned_votes:
-        return {
-            "total_votes": total_votes,
-            "cociente_electoral": 0.0,
-            "threshold_votes": 0.0,
-            "seat_counts": {party: 0 for party in cleaned_votes},
-            "seat_order": [],
-            "eligible_parties": [],
-        }
-
-    cociente = total_votes / curules_total
-    threshold_votes = cociente * 0.5
-    eligible_votes = {
-        party: votes
-        for party, votes in cleaned_votes.items()
-        if votes >= threshold_votes
-    }
-
-    if not eligible_votes:
-        eligible_votes = dict(cleaned_votes)
-        threshold_votes = 0.0
-
-    quotients: list[tuple[float, int, str, int]] = []
-    for party, votes in eligible_votes.items():
-        for divisor in range(1, curules_total + 1):
-            quotients.append((votes / divisor, votes, party, divisor))
-    quotients.sort(key=lambda item: (-item[0], -item[1], item[2]))
-
-    seat_counts = {party: 0 for party in cleaned_votes}
-    seat_order: list[str] = []
-    for quotient in quotients[:curules_total]:
-        party = quotient[2]
-        seat_counts[party] = seat_counts.get(party, 0) + 1
-        seat_order.append(party)
-
-    return {
-        "total_votes": total_votes,
-        "cociente_electoral": cociente,
-        "threshold_votes": threshold_votes,
-        "seat_counts": seat_counts,
-        "seat_order": seat_order,
-        "eligible_parties": sorted(eligible_votes.keys()),
-    }
-
-
-def _build_party_palette(parties_ordered: list[str]) -> dict[str, str]:
-    fixed = {
-        "PARTIDO CONSERVADOR": "#1e3288",
-        "CREEMOS": "#23a0dc",
-        "PARTIDO LIBERAL": "#d22c2c",
-        "PARTIDO VERDE": "#00a843",
-        "PACTO HISTORICO": "#ff1820",
-        "CENTRO DEMOCRATICO": "#2146b7",
-        "FUERZA CIUDADANA": "#ff7b2b",
-        "CAMBIO RADICAL": "#c01245",
-        "PARTIDO DE LA U": "#f3a300",
-    }
-    base_colors = [
-        "#4e79a7",
-        "#f28e2b",
-        "#e15759",
-        "#76b7b2",
-        "#13b0b7",
-        "#ce6f00",
-        "#5f6a72",
-        "#7f8f3e",
-        "#9f5f80",
-        "#2d7e6b",
-        "#8b3f2d",
-        "#5e4da1",
-    ]
-    palette: dict[str, str] = {}
-    for idx, party in enumerate(parties_ordered):
-        if party in fixed:
-            palette[party] = fixed[party]
-        else:
-            palette[party] = base_colors[idx % len(base_colors)]
-    return palette
-
-
-async def get_camara_live_projection() -> dict:
+async def get_pres_live_projection() -> dict:
+    """Return live vote totals per presidential formula from processed PRES mesas."""
     db = await get_db()
 
     mesas_row = await db.execute_fetchall(
-        """SELECT COALESCE(SUM(mesas), 0) AS total_mesas
-           FROM puestos WHERE departamento = 'ANTIOQUIA'"""
+        "SELECT COALESCE(SUM(mesas), 0) AS total_mesas FROM puestos WHERE departamento = 'ANTIOQUIA'"
     )
     total_mesas = int(mesas_row[0]["total_mesas"] or 0)
 
     processed_row = await db.execute_fetchall(
-        """SELECT COUNT(*) AS total
-           FROM e14_results
-           WHERE corporacion = 'CAM' AND status IN ('processed', 'corrected')"""
+        "SELECT COUNT(*) AS total FROM e14_results WHERE corporacion = 'PRES' AND status IN ('processed', 'corrected')"
     )
     mesas_reportadas = int(processed_row[0]["total"] or 0)
 
-    raw_party_rows = await db.execute_fetchall(
+    formula_rows = await db.execute_fetchall(
         """SELECT party_name, SUM(votes) AS votes
            FROM party_votes
-           WHERE corporacion = 'CAM'
+           WHERE corporacion = 'PRES'
            GROUP BY party_name
            HAVING SUM(votes) > 0
            ORDER BY votes DESC, party_name"""
     )
-    votes_current: defaultdict[str, int] = defaultdict(int)
-    for row in raw_party_rows:
-        normalized = _normalize_party_name(str(row["party_name"] or ""))
-        mapped = _map_party_for_dashboard(normalized)
-        if not mapped:
-            continue
-        votes_current[mapped] += int(row["votes"] or 0)
-    for preferred_party in _PREFERRED_PARTIES:
-        votes_current.setdefault(preferred_party, 0)
 
-    votes_current_dict = dict(votes_current)
-    parties_ordered = _ordered_parties(votes_current_dict)
-    curules_total = CAMARA_CURULES_ANTIOQUIA
+    total_votes = 0
+    formulas_payload = []
+    for row in formula_rows:
+        votes = int(row["votes"] or 0)
+        total_votes += votes
+        formulas_payload.append({
+            "formula_name": row["party_name"],
+            "votes": votes,
+        })
 
-    current_calc = _compute_curules(votes_current_dict, curules_total)
+    for f in formulas_payload:
+        f["vote_share_pct"] = round(f["votes"] / total_votes * 100, 2) if total_votes else 0.0
+
     projection_scale = (total_mesas / mesas_reportadas) if mesas_reportadas > 0 else 1.0
-    projected_votes = {
-        party: int(round(votes * projection_scale))
-        for party, votes in votes_current_dict.items()
-    }
-    projected_calc = _compute_curules(projected_votes, curules_total)
-
-    party_palette = _build_party_palette(parties_ordered)
-    total_votes_current = current_calc["total_votes"]
-    parties_payload = []
-    for party in parties_ordered:
-        votes = votes_current.get(party, 0)
-        vote_share_pct = (votes / total_votes_current * 100) if total_votes_current else 0.0
-        parties_payload.append(
-            {
-                "party_name": party,
-                "votes": votes,
-                "vote_share_pct": round(vote_share_pct, 2),
-                "curules_current": current_calc["seat_counts"].get(party, 0),
-                "projected_votes": projected_votes.get(party, 0),
-                "curules_projected": projected_calc["seat_counts"].get(party, 0),
-                "color": party_palette.get(party, "#5f6a72"),
-                "logo_file": _PARTY_LOGOS.get(party),
-                "is_pacto_historico": party == "PACTO HISTORICO",
-            }
-        )
-
-    # Build timeline from CAM processed order.
-    mesa_rows = await db.execute_fetchall(
-        """SELECT municipio_cod, zona_cod, puesto_cod, mesa, processed_at
-           FROM e14_results
-           WHERE corporacion = 'CAM' AND status IN ('processed', 'corrected')
-           ORDER BY
-             CASE WHEN processed_at IS NULL OR processed_at = '' THEN 1 ELSE 0 END,
-             datetime(processed_at),
-             municipio_cod, zona_cod, puesto_cod, mesa"""
-    )
-    party_vote_rows = await db.execute_fetchall(
-        """SELECT municipio_cod, zona_cod, puesto_cod, mesa, party_name, votes
-           FROM party_votes
-           WHERE corporacion = 'CAM' AND votes > 0"""
-    )
-
-    votes_by_mesa: dict[tuple[str, str, str, int], dict[str, int]] = {}
-    for row in party_vote_rows:
-        key = (row["municipio_cod"], row["zona_cod"], row["puesto_cod"], int(row["mesa"]))
-        party_map = votes_by_mesa.setdefault(key, {})
-        party_name = row["party_name"]
-        party_map[party_name] = party_map.get(party_name, 0) + int(row["votes"] or 0)
-
-    tracked_parties = [party for party in _PREFERRED_PARTIES if votes_current_dict.get(party, 0) > 0][:6]
-    if len(tracked_parties) < 6:
-        for party in parties_ordered:
-            if party not in tracked_parties:
-                tracked_parties.append(party)
-            if len(tracked_parties) >= 6:
-                break
-    timeline: list[dict] = []
-    cumulative_votes: defaultdict[str, int] = defaultdict(int)
-    timeline_target = max(1, CAMARA_TIMELINE_POINTS)
-    step = max(1, mesas_reportadas // timeline_target) if mesas_reportadas else 1
-
-    for idx, row in enumerate(mesa_rows, start=1):
-        key = (row["municipio_cod"], row["zona_cod"], row["puesto_cod"], int(row["mesa"]))
-        for party_name, votes in votes_by_mesa.get(key, {}).items():
-            normalized = _normalize_party_name(party_name)
-            mapped = _map_party_for_dashboard(normalized)
-            if not mapped:
-                continue
-            cumulative_votes[mapped] += votes
-
-        include_point = idx == 1 or idx == mesas_reportadas or idx % step == 0
-        if not include_point:
-            continue
-
-        point_calc = _compute_curules(dict(cumulative_votes), curules_total)
-        timeline.append(
-            {
-                "mesas_reportadas": idx,
-                "coverage_pct": round((idx / total_mesas * 100) if total_mesas else 0.0, 2),
-                "timestamp": row["processed_at"],
-                "party_votes": {party: cumulative_votes.get(party, 0) for party in tracked_parties},
-                "party_curules": {
-                    party: point_calc["seat_counts"].get(party, 0) for party in tracked_parties
-                },
-            }
-        )
 
     return {
-        "curules_total": curules_total,
         "mesas_total": total_mesas,
         "mesas_reportadas": mesas_reportadas,
         "coverage_pct": round((mesas_reportadas / total_mesas * 100) if total_mesas else 0.0, 2),
         "projection_scale": round(projection_scale, 4),
-        "total_votes_current": total_votes_current,
-        "cociente_electoral_current": round(current_calc["cociente_electoral"], 2),
-        "threshold_votes_current": round(current_calc["threshold_votes"], 2),
-        "parties": parties_payload,
-        "tracked_parties": tracked_parties,
-        "seat_order_current": current_calc["seat_order"],
-        "seat_order_visual_current": _build_visual_seat_order(
-            current_calc["seat_counts"], votes_current_dict, curules_total
-        ),
-        "seat_order_projected": projected_calc["seat_order"],
-        "seat_order_visual_projected": _build_visual_seat_order(
-            projected_calc["seat_counts"], projected_votes, curules_total
-        ),
-        "timeline": timeline,
+        "total_votes": total_votes,
+        "formulas": formulas_payload,
         "updated_at": datetime.now().isoformat(),
     }
 
@@ -2368,3 +2139,272 @@ async def get_crop_override(mun: str, zona: str, puesto: str, mesa: int,
         r = rows[0]
         return (r["x0_pct"], r["y0_pct"], r["x1_pct"], r["y1_pct"])
     return None
+
+
+# ── Field-level validations (Tinder por candidato) ───────────────────────────
+
+async def seed_field_validations(
+    municipio_cod: str, zona_cod: str, puesto_cod: str, mesa: int,
+    corporacion: str, sections_json: str, ocr_results: dict
+) -> int:
+    """Crea filas pending en field_validations para cada campo del acta.
+
+    Llama esto justo después de insert_result para que el Tinder tenga
+    una fila por cada candidato / nivelacion / blancos-nulos / firmas / recuento.
+    Solo inserta si no existe ya (IGNORE).
+
+    Devuelve la cantidad de filas insertadas.
+    """
+    db = await get_db()
+    try:
+        sections = json.loads(sections_json or "[]")
+    except Exception:
+        sections = []
+
+    inserted = 0
+    now = datetime.now().isoformat()
+
+    for s in sections:
+        tipo = s.get("tipo", "otro")
+        codigo = s.get("codigo", "")
+        nombre = s.get("candidato_presidente") or s.get("nombre", "")
+        partido = s.get("partido", "")
+        total_votos = int(s.get("total_votos", 0) or 0)
+
+        # region_id debe coincidir con el id del template
+        if tipo == "formula":
+            region_id  = f"cand_{codigo}"
+            campo_label = f"Candidato {codigo} - {nombre[:40]}"
+            if partido:
+                campo_label += f" ({partido[:30]})"
+            ocr_val = total_votos
+        elif tipo == "votos_en_blanco":
+            region_id   = "blancos"
+            campo_label = "Votos en Blanco"
+            ocr_val     = total_votos
+        elif tipo == "votos_nulos":
+            region_id   = "nulos"
+            campo_label = "Votos Nulos"
+            ocr_val     = total_votos
+        elif tipo == "votos_no_marcados":
+            region_id   = "no_marcados"
+            campo_label = "Votos No Marcados"
+            ocr_val     = total_votos
+        else:
+            continue
+
+        await db.execute(
+            """INSERT OR IGNORE INTO field_validations
+               (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+                region_id, tipo, campo_label, ocr_valor, ocr_raw, ocr_conf,
+                action, validated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?)""",
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             region_id, tipo, campo_label, ocr_val,
+             str(ocr_val), ocr_results.get(region_id + "_conf"),
+             now),
+        )
+        inserted += 1
+
+    # Nivelacion E-11 y Urna (del resultado principal)
+    for rid, label, key in [
+        ("niv_e11",   "Total Votantes E-11",   "votantes_e11"),
+        ("niv_urna",  "Total Votos en Urna",   "votos_urna"),
+    ]:
+        val = ocr_results.get(key)
+        await db.execute(
+            """INSERT OR IGNORE INTO field_validations
+               (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+                region_id, tipo, campo_label, ocr_valor, action, validated_at)
+               VALUES (?,?,?,?,?,'{}','nivelacion',?,?,NULL,?)""".format(rid),
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             label, val, now),
+        )
+        inserted += 1
+
+    await db.commit()
+    return inserted
+
+
+async def get_next_field_to_validate(username: str) -> dict | None:
+    """Devuelve el siguiente campo pendiente de validación para el Tinder.
+
+    Orden: mesas más antiguas primero, campo con menor region_id primero.
+    Incluye los datos del PDF necesarios para mostrar el pantallazo.
+    """
+    db = await get_db()
+
+    # Buscar el próximo campo no validado ni reclamado
+    rows = await db.execute_fetchall("""
+        SELECT fv.*,
+               d.filepath,
+               p.municipio,
+               p.nombre AS puesto_nombre,
+               r.ocr_confidence
+        FROM field_validations fv
+        JOIN e14_downloads d
+            ON d.municipio_cod = fv.municipio_cod
+            AND d.zona_cod     = fv.zona_cod
+            AND d.puesto_cod   = fv.puesto_cod
+            AND d.mesa         = fv.mesa
+            AND d.corporacion  = fv.corporacion
+        LEFT JOIN puestos p
+            ON p.municipio_cod = fv.municipio_cod
+            AND p.zona_cod     = fv.zona_cod
+            AND p.puesto_cod   = fv.puesto_cod
+        LEFT JOIN e14_results r
+            ON r.municipio_cod = fv.municipio_cod
+            AND r.zona_cod     = fv.zona_cod
+            AND r.puesto_cod   = fv.puesto_cod
+            AND r.mesa         = fv.mesa
+            AND r.corporacion  = fv.corporacion
+        WHERE (fv.action IS NULL OR fv.action = 'pending')
+        ORDER BY fv.municipio_cod, fv.mesa, fv.region_id
+        LIMIT 1
+    """)
+
+    if not rows:
+        return None
+
+    row = dict(rows[0])
+    return row
+
+
+async def submit_field_validation(
+    municipio_cod: str, zona_cod: str, puesto_cod: str,
+    mesa: int, corporacion: str, region_id: str,
+    action: str, validated_valor: int | None,
+    novelty_note: str | None, validated_by: str
+) -> bool:
+    """Guarda la decisión del validador para un campo individual."""
+    db = await get_db()
+    now = datetime.now().isoformat()
+
+    await db.execute(
+        """UPDATE field_validations
+           SET action = ?,
+               validated_valor = ?,
+               novelty_note = ?,
+               validated_by = ?,
+               validated_at = ?
+           WHERE municipio_cod = ? AND zona_cod = ? AND puesto_cod = ?
+             AND mesa = ? AND corporacion = ? AND region_id = ?""",
+        (action,
+         validated_valor,
+         novelty_note,
+         validated_by, now,
+         municipio_cod, zona_cod, puesto_cod,
+         mesa, corporacion, region_id),
+    )
+    await db.commit()
+
+    # Si todos los campos de esta mesa están validados → marcar result como corrected
+    pending = await db.execute_fetchall(
+        """SELECT COUNT(*) AS n FROM field_validations
+           WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=?
+             AND mesa=? AND corporacion=?
+             AND (action IS NULL OR action='pending')""",
+        (municipio_cod, zona_cod, puesto_cod, mesa, corporacion),
+    )
+    if int((pending[0]["n"] if pending else 1) or 1) == 0:
+        await db.execute(
+            """UPDATE e14_results SET status='corrected', corrected_by=?, corrected_at=?
+               WHERE municipio_cod=? AND zona_cod=? AND puesto_cod=? AND mesa=? AND corporacion=?""",
+            (validated_by, now,
+             municipio_cod, zona_cod, puesto_cod, mesa, corporacion),
+        )
+        await db.commit()
+
+    return True
+
+
+async def get_field_validation_stats() -> dict:
+    """Estadísticas del Tinder de validación por campo."""
+    db = await get_db()
+    rows = await db.execute_fetchall("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN action IS NULL OR action='pending' THEN 1 ELSE 0 END) AS pending,
+            SUM(CASE WHEN action='approved' THEN 1 ELSE 0 END)  AS approved,
+            SUM(CASE WHEN action='corrected' THEN 1 ELSE 0 END) AS corrected,
+            SUM(CASE WHEN action='novelty'   THEN 1 ELSE 0 END) AS novelty
+        FROM field_validations
+    """)
+    r = dict(rows[0]) if rows else {}
+    return {
+        "total":     int(r.get("total",     0) or 0),
+        "pending":   int(r.get("pending",   0) or 0),
+        "approved":  int(r.get("approved",  0) or 0),
+        "corrected": int(r.get("corrected", 0) or 0),
+        "novelty":   int(r.get("novelty",   0) or 0),
+    }
+
+
+async def get_coverage_report(municipio_cod: str | None = None) -> list[dict]:
+    """Cobertura DIVIPOL: mesas esperadas vs descargadas vs procesadas vs validadas.
+
+    Agrupa por municipio.  municipio_cod=None devuelve todos los municipios.
+    """
+    db = await get_db()
+
+    mun_filter = ""
+    params: list[object] = []
+    if municipio_cod:
+        mun_filter = "WHERE p.municipio_cod = ?"
+        params.append(municipio_cod)
+
+    rows = await db.execute_fetchall(f"""
+        SELECT
+            p.municipio_cod,
+            MAX(p.municipio)                AS municipio,
+            COALESCE(SUM(p.mesas), 0)       AS mesas_divipol,
+            COUNT(DISTINCT d.mesa || '-' || d.municipio_cod || '-' || d.zona_cod || '-' || d.puesto_cod)
+                                            AS mesas_descargadas,
+            COUNT(DISTINCT CASE WHEN r.status IN ('processed','corrected')
+                THEN r.mesa || '-' || r.municipio_cod || '-' || r.zona_cod || '-' || r.puesto_cod
+                END)                        AS mesas_procesadas,
+            (SELECT COUNT(DISTINCT fv.mesa || '-' || fv.municipio_cod || '-' || fv.zona_cod || '-' || fv.puesto_cod)
+             FROM field_validations fv
+             WHERE fv.municipio_cod = p.municipio_cod
+               AND (fv.action IN ('approved','corrected','novelty'))
+            )                               AS mesas_con_validacion,
+            COUNT(DISTINCT CASE WHEN al.is_resolved = 0 AND al.severity='danger'
+                THEN al.id END)             AS alertas_activas
+        FROM puestos p
+        LEFT JOIN e14_downloads d
+            ON d.municipio_cod = p.municipio_cod
+            AND d.zona_cod     = p.zona_cod
+            AND d.puesto_cod   = p.puesto_cod
+            AND d.corporacion  = 'PRES'
+        LEFT JOIN e14_results r
+            ON r.municipio_cod = p.municipio_cod
+            AND r.zona_cod     = p.zona_cod
+            AND r.puesto_cod   = p.puesto_cod
+            AND r.corporacion  = 'PRES'
+        LEFT JOIN alerts al
+            ON al.municipio_cod = p.municipio_cod
+        {mun_filter}
+        GROUP BY p.municipio_cod
+        ORDER BY p.municipio_cod
+    """, params)
+
+    result = []
+    for r in rows:
+        divipol  = int(r["mesas_divipol"]        or 0)
+        descarg  = int(r["mesas_descargadas"]     or 0)
+        proc     = int(r["mesas_procesadas"]      or 0)
+        valid    = int(r["mesas_con_validacion"]  or 0)
+        alertas  = int(r["alertas_activas"]       or 0)
+        result.append({
+            "municipio_cod":        r["municipio_cod"],
+            "municipio":            r["municipio"],
+            "mesas_divipol":        divipol,
+            "mesas_descargadas":    descarg,
+            "mesas_procesadas":     proc,
+            "mesas_validadas":      valid,
+            "alertas_activas":      alertas,
+            "pct_descargado":  round(descarg / divipol * 100, 1) if divipol else 0,
+            "pct_procesado":   round(proc    / divipol * 100, 1) if divipol else 0,
+            "pct_validado":    round(valid   / divipol * 100, 1) if divipol else 0,
+        })
+    return result

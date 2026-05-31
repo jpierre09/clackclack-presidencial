@@ -25,7 +25,7 @@ interface NdResponse {
 const PAGE = 100;
 
 export function NotDigitizedPage() {
-  const [corp, setCorp] = useState<"SEN" | "CAM">("SEN");
+  const corp = "PRES";
   const [total, setTotal] = useState(0);
   const [items, setItems] = useState<NdItem[]>([]);
   const [offset, setOffset] = useState(0);
@@ -150,16 +150,7 @@ export function NotDigitizedPage() {
           )}
         </div>
         <div className="nd-corp-toggle">
-          {(["SEN", "CAM"] as const).map((c) => (
-            <button
-              key={c}
-              type="button"
-              className={`corp-btn${corp === c ? " active" : ""}`}
-              onClick={() => setCorp(c)}
-            >
-              {c}
-            </button>
-          ))}
+          <button type="button" className="corp-btn active">PRES</button>
         </div>
       </div>
 

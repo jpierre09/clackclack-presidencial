@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent as RMouseEvent } from "react";
-import { getNovedades, downloadNovedadesExport, getAdminValidations, adminCorrectValidation, resolveNovedad } from "../api";
+import { getNovedades, downloadNovedadesExport, getAdminValidations, adminCorrectValidation, resolveNovedad, purgeBadScanNovedades } from "../api";
 import type { NovedadItem } from "../types";
 
 interface Props {
@@ -44,6 +44,10 @@ export function NovedadesPage({ pendingCount }: Props) {
   const [tokenPrompt, setTokenPrompt] = useState(false);
   const [pendingItem, setPendingItem] = useState<NovedadItem | null>(null);
   const tokenInputRef = useRef<HTMLInputElement>(null);
+
+  const [purging, setPurging] = useState(false);
+  // pendingAction: what to do after the token prompt resolves
+  const [pendingAction, setPendingAction] = useState<"crop" | "purge" | null>(null);
 
   // Crop modal
   const [crop, setCrop] = useState<CropModalState | null>(null);
@@ -125,11 +129,36 @@ export function NovedadesPage({ pendingCount }: Props) {
   function openCropEditor(item: NovedadItem) {
     if (!adminToken) {
       setPendingItem(item);
+      setPendingAction("crop");
       setTokenPrompt(true);
       setTimeout(() => tokenInputRef.current?.focus(), 50);
       return;
     }
     startCrop(item);
+  }
+
+  async function doPurgeBadScan(token: string) {
+    if (!confirm("¿Eliminar todas las novedades 'Mal escaneado' y reencolar los PDFs para re-descarga?")) return;
+    setPurging(true);
+    try {
+      const r = await purgeBadScanNovedades(token);
+      alert(r.message);
+      setItems(await getNovedades());
+    } catch (e) {
+      alert("Error: " + String(e));
+    } finally {
+      setPurging(false);
+    }
+  }
+
+  function openPurgeBadScan() {
+    if (!adminToken) {
+      setPendingAction("purge");
+      setTokenPrompt(true);
+      setTimeout(() => tokenInputRef.current?.focus(), 50);
+      return;
+    }
+    void doPurgeBadScan(adminToken);
   }
 
   function startCrop(item: NovedadItem) {
@@ -241,6 +270,17 @@ export function NovedadesPage({ pendingCount }: Props) {
         <button type="button" className="action-btn" onClick={() => void downloadNovedadesExport()}>
           Descargar (.xlsx)
         </button>
+        {items.some((i) => i.novelty_note?.toLowerCase().includes("mal escaneado")) && (
+          <button
+            type="button"
+            className="action-btn danger"
+            disabled={purging}
+            onClick={openPurgeBadScan}
+            title="Elimina las novedades 'Mal escaneado' y borra los PDFs para que sean re-descargados"
+          >
+            {purging ? "Eliminando..." : "Re-descargar mal escaneados"}
+          </button>
+        )}
       </div>
 
       <div className="novedades-filters">
@@ -501,15 +541,19 @@ export function NovedadesPage({ pendingCount }: Props) {
             onKeyDown={(e) => {
               if (e.key === "Enter" && adminToken) {
                 setTokenPrompt(false);
-                if (pendingItem) {
+                if (pendingAction === "crop" && pendingItem) {
                   const item = pendingItem;
-                  setPendingItem(null);
+                  setPendingItem(null); setPendingAction(null);
                   startCrop(item);
+                } else if (pendingAction === "purge") {
+                  setPendingAction(null);
+                  void doPurgeBadScan(adminToken);
                 } else {
+                  setPendingAction(null);
                   searchValidations();
                 }
               }
-              if (e.key === "Escape") { setTokenPrompt(false); setPendingItem(null); }
+              if (e.key === "Escape") { setTokenPrompt(false); setPendingItem(null); setPendingAction(null); }
             }}
           />
           <div className="tinder-modal-actions">
@@ -520,11 +564,15 @@ export function NovedadesPage({ pendingCount }: Props) {
               onClick={() => {
                 if (!adminToken) return;
                 setTokenPrompt(false);
-                if (pendingItem) {
+                if (pendingAction === "crop" && pendingItem) {
                   const item = pendingItem;
-                  setPendingItem(null);
+                  setPendingItem(null); setPendingAction(null);
                   startCrop(item);
+                } else if (pendingAction === "purge") {
+                  setPendingAction(null);
+                  void doPurgeBadScan(adminToken);
                 } else {
+                  setPendingAction(null);
                   searchValidations();
                 }
               }}

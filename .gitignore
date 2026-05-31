@@ -1,30 +1,59 @@
+# Python
 __pycache__/
 *.pyc
-e14_downloads/
-.claude/
+*.pyo
+.venv/
+backend/.venv/
+*.egg-info/
+
+# Base de datos — nunca subir (contiene datos sensibles)
 *.db
 *.db-wal
 *.db-shm
-backend/__pycache__/
-backend/.venv/
+
+# Descargados en producción
+e14_downloads/
+
+# Exports/reports generados
+exports/
+
+# IDE y herramientas locales
+.claude/
+.vscode/
+.idea/
+
+# Frontend build
 frontend/node_modules/
 frontend/dist/
-results/
-*.xlsx
-!data/*.xlsx
+frontend/tsconfig.tsbuildinfo
 
-# Secrets
+# Secretos — NUNCA al repo
+.env
+.env.*
 ClaudeApiKeys.txt
 ClaudeKeyState.json
 *ApiKey*.txt
-*Api*.txt
+*ApiKeys*.txt
+
+# Archivos de depuración temporales
+tmp_*.png
+tmp_*.jpg
+tmp_*.pdf
+
+# Logs
+*.log
+/tmp/
+
+# Excel generados (no data/)
+results/
+reports/
+*.xlsx
+!data/*.xlsx
+
+# JSON — incluir solo los necesarios
 *.json
 !package.json
 !package-lock.json
 !tsconfig*.json
 !data/*.json
 !frontend/public/**
-*-client-*.json
-service-account*.json
-.env
-.env.*

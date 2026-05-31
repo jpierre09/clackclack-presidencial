@@ -1,0 +1,737 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-31T05:28:33.983804",
+  "regions": [
+    {
+      "id": "niv_e11",
+      "tipo": "nivelacion",
+      "label": "Total Votantes E-11",
+      "page": 1,
+      "x0_pct": 0.7013,
+      "y0_pct": 0.2444,
+      "x1_pct": 0.9416,
+      "y1_pct": 0.2711,
+      "numero": "E11",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "niv_urna",
+      "tipo": "nivelacion",
+      "label": "Total Votos en Urna",
+      "page": 1,
+      "x0_pct": 0.6981,
+      "y0_pct": 0.2711,
+      "x1_pct": 0.9416,
+      "y1_pct": 0.2978,
+      "numero": "URNA",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "niv_inc",
+      "tipo": "nivelacion",
+      "label": "Total Votos Incinerados",
+      "page": 1,
+      "x0_pct": 0.6948,
+      "y0_pct": 0.2967,
+      "x1_pct": 0.9416,
+      "y1_pct": 0.3278,
+      "numero": "INCINERADOS",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_1",
+      "tipo": "candidato",
+      "label": "Candidato 1",
+      "page": 1,
+      "x0_pct": 0.6948,
+      "y0_pct": 0.3689,
+      "x1_pct": 0.9351,
+      "y1_pct": 0.4378,
+      "numero": 1,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_2",
+      "tipo": "candidato",
+      "label": "Candidato 2",
+      "page": 1,
+      "x0_pct": 0.6721,
+      "y0_pct": 0.45,
+      "x1_pct": 0.9383,
+      "y1_pct": 0.5244,
+      "numero": 2,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_3",
+      "tipo": "candidato",
+      "label": "Candidato 3",
+      "page": 1,
+      "x0_pct": 0.6818,
+      "y0_pct": 0.5378,
+      "x1_pct": 0.9416,
+      "y1_pct": 0.6067,
+      "numero": 3,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_4",
+      "tipo": "candidato",
+      "label": "Candidato 4",
+      "page": 1,
+      "x0_pct": 0.6721,
+      "y0_pct": 0.6233,
+      "x1_pct": 0.9448,
+      "y1_pct": 0.6956,
+      "numero": 4,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_5",
+      "tipo": "candidato",
+      "label": "Candidato 5",
+      "page": 1,
+      "x0_pct": 0.6753,
+      "y0_pct": 0.7089,
+      "x1_pct": 0.9513,
+      "y1_pct": 0.7789,
+      "numero": 5,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_6",
+      "tipo": "candidato",
+      "label": "Candidato 6",
+      "page": 1,
+      "x0_pct": 0.6429,
+      "y0_pct": 0.7922,
+      "x1_pct": 0.9448,
+      "y1_pct": 0.8633,
+      "numero": 6,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_7",
+      "tipo": "candidato",
+      "label": "Candidato 7",
+      "page": 1,
+      "x0_pct": 0.6818,
+      "y0_pct": 0.8778,
+      "x1_pct": 0.9383,
+      "y1_pct": 0.9467,
+      "numero": 7,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_8",
+      "tipo": "candidato",
+      "label": "Candidato 8",
+      "page": 2,
+      "x0_pct": 0.6538,
+      "y0_pct": 0.2533,
+      "x1_pct": 0.9327,
+      "y1_pct": 0.3244,
+      "numero": 8,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_9",
+      "tipo": "candidato",
+      "label": "Candidato 9",
+      "page": 2,
+      "x0_pct": 0.6667,
+      "y0_pct": 0.3378,
+      "x1_pct": 0.9359,
+      "y1_pct": 0.4078,
+      "numero": 9,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_10",
+      "tipo": "candidato",
+      "label": "Candidato 10",
+      "page": 2,
+      "x0_pct": 0.6635,
+      "y0_pct": 0.4222,
+      "x1_pct": 0.9359,
+      "y1_pct": 0.4967,
+      "numero": 10,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_11",
+      "tipo": "candidato",
+      "label": "Candidato 11",
+      "page": 2,
+      "x0_pct": 0.6731,
+      "y0_pct": 0.5089,
+      "x1_pct": 0.9391,
+      "y1_pct": 0.5822,
+      "numero": 11,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_12",
+      "tipo": "candidato",
+      "label": "Candidato 12",
+      "page": 2,
+      "x0_pct": 0.6635,
+      "y0_pct": 0.5933,
+      "x1_pct": 0.9359,
+      "y1_pct": 0.6644,
+      "numero": 12,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "cand_13",
+      "tipo": "candidato",
+      "label": "Candidato 13",
+      "page": 2,
+      "x0_pct": 0.6795,
+      "y0_pct": 0.6767,
+      "x1_pct": 0.9359,
+      "y1_pct": 0.7467,
+      "numero": 13,
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "blancos",
+      "tipo": "blancos_nulos",
+      "label": "Votos en Blanco",
+      "page": 2,
+      "x0_pct": 0.6987,
+      "y0_pct": 0.7689,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.7933,
+      "numero": "BLANCOS",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "nulos",
+      "tipo": "blancos_nulos",
+      "label": "Votos Nulos",
+      "page": 2,
+      "x0_pct": 0.7051,
+      "y0_pct": 0.7944,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.82,
+      "numero": "NULOS",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "no_marcados",
+      "tipo": "blancos_nulos",
+      "label": "Votos No Marcados",
+      "page": 2,
+      "x0_pct": 0.7083,
+      "y0_pct": 0.8189,
+      "x1_pct": 0.9391,
+      "y1_pct": 0.8444,
+      "numero": "NO_MARCADOS",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "suma_total",
+      "tipo": "blancos_nulos",
+      "label": "Suma Total",
+      "page": 2,
+      "x0_pct": 0.7051,
+      "y0_pct": 0.8422,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.8722,
+      "numero": "SUMA",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "recuento",
+      "tipo": "recuento",
+      "label": "Hubo recuento de votos",
+      "page": 3,
+      "x0_pct": 0.0868,
+      "y0_pct": 0.7578,
+      "x1_pct": 0.5113,
+      "y1_pct": 0.82,
+      "numero": "RECUENTO",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_1",
+      "tipo": "firmas",
+      "label": "Firma Jurado 1",
+      "page": 3,
+      "x0_pct": 0.0932,
+      "y0_pct": 0.7567,
+      "x1_pct": 0.5145,
+      "y1_pct": 0.8211,
+      "numero": "FIRMA1",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_2",
+      "tipo": "firmas",
+      "label": "Firma Jurado 2",
+      "page": 3,
+      "x0_pct": 0.5338,
+      "y0_pct": 0.7544,
+      "x1_pct": 0.9453,
+      "y1_pct": 0.8233,
+      "numero": "FIRMA2",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_3",
+      "tipo": "firmas",
+      "label": "Firma Jurado 3",
+      "page": 3,
+      "x0_pct": 0.0836,
+      "y0_pct": 0.8233,
+      "x1_pct": 0.5048,
+      "y1_pct": 0.8844,
+      "numero": "FIRMA3",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_4",
+      "tipo": "firmas",
+      "label": "Firma Jurado 4",
+      "page": 3,
+      "x0_pct": 0.5273,
+      "y0_pct": 0.8233,
+      "x1_pct": 0.9486,
+      "y1_pct": 0.8867,
+      "numero": "FIRMA4",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_5",
+      "tipo": "firmas",
+      "label": "Firma Jurado 5",
+      "page": 3,
+      "x0_pct": 0.0804,
+      "y0_pct": 0.89,
+      "x1_pct": 0.508,
+      "y1_pct": 0.9533,
+      "numero": "FIRMA5",
+      "nombre": null,
+      "partido": null
+    },
+    {
+      "id": "firma_6",
+      "tipo": "firmas",
+      "label": "Firma Jurado 6",
+      "page": 3,
+      "x0_pct": 0.5241,
+      "y0_pct": 0.8922,
+      "x1_pct": 0.955,
+      "y1_pct": 0.9589,
+      "numero": "FIRMA6",
+      "nombre": null,
+      "partido": null
+    }
+  ],
+  "screenshot_regions": {
+    "niv_e11": {
+      "page": 1,
+      "tipo": "nivelacion",
+      "label": "Total Votantes E-11",
+      "x0_pct": 0.0747,
+      "y0_pct": 0.2422,
+      "x1_pct": 0.9448,
+      "y1_pct": 0.2733,
+      "_color": [
+        220,
+        100,
+        40
+      ]
+    },
+    "niv_urna": {
+      "page": 1,
+      "tipo": "nivelacion",
+      "label": "Total Votos en Urna",
+      "x0_pct": 0.0714,
+      "y0_pct": 0.2744,
+      "x1_pct": 0.9448,
+      "y1_pct": 0.2967,
+      "_color": [
+        220,
+        100,
+        40
+      ]
+    },
+    "niv_inc": {
+      "page": 1,
+      "tipo": "nivelacion",
+      "label": "Total Votos Incinerados",
+      "x0_pct": 0.0714,
+      "y0_pct": 0.2967,
+      "x1_pct": 0.9513,
+      "y1_pct": 0.3267,
+      "_color": [
+        220,
+        100,
+        40
+      ]
+    },
+    "cand_1": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 1",
+      "x0_pct": 0.0812,
+      "y0_pct": 0.3644,
+      "x1_pct": 0.9481,
+      "y1_pct": 0.4367,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_2": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 2",
+      "x0_pct": 0.0844,
+      "y0_pct": 0.4489,
+      "x1_pct": 0.9448,
+      "y1_pct": 0.5233,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_3": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 3",
+      "x0_pct": 0.0714,
+      "y0_pct": 0.5356,
+      "x1_pct": 0.9481,
+      "y1_pct": 0.6133,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_4": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 4",
+      "x0_pct": 0.0779,
+      "y0_pct": 0.6167,
+      "x1_pct": 0.9513,
+      "y1_pct": 0.6978,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_5": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 5",
+      "x0_pct": 0.0714,
+      "y0_pct": 0.7056,
+      "x1_pct": 0.9481,
+      "y1_pct": 0.7833,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_6": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 6",
+      "x0_pct": 0.0844,
+      "y0_pct": 0.7911,
+      "x1_pct": 0.9481,
+      "y1_pct": 0.8644,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_7": {
+      "page": 1,
+      "tipo": "candidato",
+      "label": "Candidato 7",
+      "x0_pct": 0.0714,
+      "y0_pct": 0.8756,
+      "x1_pct": 0.9481,
+      "y1_pct": 0.9522,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_8": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 8",
+      "x0_pct": 0.0833,
+      "y0_pct": 0.25,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.3267,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_9": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 9",
+      "x0_pct": 0.0801,
+      "y0_pct": 0.3333,
+      "x1_pct": 0.9455,
+      "y1_pct": 0.4111,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_10": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 10",
+      "x0_pct": 0.0769,
+      "y0_pct": 0.4233,
+      "x1_pct": 0.9391,
+      "y1_pct": 0.4989,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_11": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 11",
+      "x0_pct": 0.0769,
+      "y0_pct": 0.5033,
+      "x1_pct": 0.9455,
+      "y1_pct": 0.5833,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_12": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 12",
+      "x0_pct": 0.0801,
+      "y0_pct": 0.5889,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.6678,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "cand_13": {
+      "page": 2,
+      "tipo": "candidato",
+      "label": "Candidato 13",
+      "x0_pct": 0.0705,
+      "y0_pct": 0.6722,
+      "x1_pct": 0.9487,
+      "y1_pct": 0.7544,
+      "_color": [
+        50,
+        210,
+        50
+      ]
+    },
+    "blancos": {
+      "page": 2,
+      "tipo": "blancos_nulos",
+      "label": "Votos en Blanco",
+      "x0_pct": 0.0833,
+      "y0_pct": 0.7667,
+      "x1_pct": 0.9487,
+      "y1_pct": 0.7911,
+      "_color": [
+        30,
+        190,
+        220
+      ]
+    },
+    "nulos": {
+      "page": 2,
+      "tipo": "blancos_nulos",
+      "label": "Votos Nulos",
+      "x0_pct": 0.0833,
+      "y0_pct": 0.7944,
+      "x1_pct": 0.9455,
+      "y1_pct": 0.8222,
+      "_color": [
+        30,
+        190,
+        220
+      ]
+    },
+    "no_marcados": {
+      "page": 2,
+      "tipo": "blancos_nulos",
+      "label": "Votos No Marcados",
+      "x0_pct": 0.0801,
+      "y0_pct": 0.82,
+      "x1_pct": 0.9423,
+      "y1_pct": 0.8411,
+      "_color": [
+        30,
+        190,
+        220
+      ]
+    },
+    "suma_total": {
+      "page": 2,
+      "tipo": "blancos_nulos",
+      "label": "Suma Total",
+      "x0_pct": 0.0962,
+      "y0_pct": 0.8444,
+      "x1_pct": 0.9487,
+      "y1_pct": 0.8722,
+      "_color": [
+        30,
+        190,
+        220
+      ]
+    },
+    "recuento": {
+      "page": 3,
+      "tipo": "recuento",
+      "label": "Hubo recuento de votos",
+      "x0_pct": 0.09,
+      "y0_pct": 0.5833,
+      "x1_pct": 0.6174,
+      "y1_pct": 0.6133,
+      "_color": [
+        50,
+        130,
+        255
+      ]
+    },
+    "firma_1": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 1",
+      "x0_pct": 0.0836,
+      "y0_pct": 0.7567,
+      "x1_pct": 0.508,
+      "y1_pct": 0.8167,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    },
+    "firma_2": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 2",
+      "x0_pct": 0.5209,
+      "y0_pct": 0.7556,
+      "x1_pct": 0.9453,
+      "y1_pct": 0.82,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    },
+    "firma_3": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 3",
+      "x0_pct": 0.0804,
+      "y0_pct": 0.8244,
+      "x1_pct": 0.5113,
+      "y1_pct": 0.8889,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    },
+    "firma_4": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 4",
+      "x0_pct": 0.5145,
+      "y0_pct": 0.8244,
+      "x1_pct": 0.9453,
+      "y1_pct": 0.8889,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    },
+    "firma_5": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 5",
+      "x0_pct": 0.0804,
+      "y0_pct": 0.8944,
+      "x1_pct": 0.5113,
+      "y1_pct": 0.9567,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    },
+    "firma_6": {
+      "page": 3,
+      "tipo": "firmas",
+      "label": "Firma Jurado 6",
+      "x0_pct": 0.5145,
+      "y0_pct": 0.8889,
+      "x1_pct": 0.9486,
+      "y1_pct": 0.96,
+      "_color": [
+        190,
+        50,
+        220
+      ]
+    }
+  }
+}

@@ -76,15 +76,15 @@ async def upload_e14(
     zona_code: str = Form(...),   # e.g. "01"
     puesto_code: str = Form(...), # e.g. "01"
     mesa: int = Form(...),        # e.g. 3
-    corp: str = Form(...),        # "SEN" | "CAM"
+    corp: str = Form(...),        # "PRES"
 ):
-    """Accept a PDF upload and ingest it as if it came from SFTP."""
+    """Accept a PDF upload and ingest it as if it came from the local folder."""
     from pathlib import Path
     from backend.services.local_ingest import ingest_file
 
     corp = corp.upper()
-    if corp not in ("SEN", "CAM"):
-        raise HTTPException(status_code=400, detail="corp must be SEN or CAM")
+    if corp not in ("PRES", "PRE", "PRESIDENCIAL"):
+        raise HTTPException(status_code=400, detail="corp must be PRES")
 
     dest_dir = (
         E14_DOWNLOADS_DIR
@@ -534,21 +534,20 @@ async def patch_novelty(
     conn = await db.get_db()
     now = datetime.now().isoformat()
     patched = []
-    for corp in ("SEN", "CAM"):
-        await conn.execute("""
-            INSERT INTO manual_validations
-                (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
-                 action, corrected_ph_votes, novelty_note, validated_by, validated_at)
-            VALUES (?, ?, ?, ?, ?, 'novelty', NULL, ?, 'admin_patch', ?)
-            ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
-            DO UPDATE SET
-                action = 'novelty',
-                corrected_ph_votes = NULL,
-                novelty_note = excluded.novelty_note,
-                validated_by = 'admin_patch',
-                validated_at = excluded.validated_at
-        """, (municipio_cod, zona_cod, puesto_cod, mesa, corp, note, now))
-        patched.append(corp)
+    await conn.execute("""
+        INSERT INTO manual_validations
+            (municipio_cod, zona_cod, puesto_cod, mesa, corporacion,
+             action, corrected_ph_votes, novelty_note, validated_by, validated_at)
+        VALUES (?, ?, ?, ?, 'PRES', 'novelty', NULL, ?, 'admin_patch', ?)
+        ON CONFLICT(municipio_cod, zona_cod, puesto_cod, mesa, corporacion)
+        DO UPDATE SET
+            action = 'novelty',
+            corrected_ph_votes = NULL,
+            novelty_note = excluded.novelty_note,
+            validated_by = 'admin_patch',
+            validated_at = excluded.validated_at
+    """, (municipio_cod, zona_cod, puesto_cod, mesa, note, now))
+    patched.append("PRES")
 
     # Dismiss any existing vote_discrepancy alert for this mesa
     await conn.execute("""
