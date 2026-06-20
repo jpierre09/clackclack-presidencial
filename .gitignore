@@ -57,3 +57,4 @@ reports/
 !tsconfig*.json
 !data/*.json
 !frontend/public/**
+backend/venv/
